@@ -55,8 +55,8 @@ tokens/s on the same machine (its README reports about 1,650 on the machine it w
 | Nonzero weights | 9.3M of 466.6M parameters | 2.8M (NROM) to 3.1M (MMC3, 512 KB), of which 25k to 62k are in the attention and FFN layers |
 | Size | 933 MB as bf16; 3.3 MB zipped | 3.2 GB (NROM) to 6.0 GB as dense fp64; 1.7 to 1.9 MB zipped |
 | Attention heads | 7 layers of DeltaNet heads | 25 to 28 heads, 2 dims each |
-| Tokens/s, engine alone | 3,617 | about 33,000 (NROM), 31,000 (UxROM), 22,000 (MMC1), 14,000 to 18,000 (MMC3) |
-| Speed vs a real NES, host included | 150-290x slower (its README) | 6.4x to 13.4x slower (table below) |
+| Tokens/s, engine alone | 3,617 | about 100,000 (NROM), 97,000 (UxROM), 79,000 (MMC1), 67,000 (MMC3) |
+| Speed vs a real NES, host included | 150-290x slower (its README) | 3.0x to 5.2x slower (table below) |
 | Mappers | NROM | NROM, UxROM, CNROM, MMC1, MMC3 |
 | Code in RAM | halts | runs |
 
@@ -74,11 +74,11 @@ second.
 
 | Game | Frames/s | Slower than a real NES |
 |---|---|---|
-| Mega Man | 9.40 | 6.4x |
-| Thwaite | 7.70 | 7.8x |
-| Super Mario Bros. | 7.22 | 8.3x |
-| The Legend of Zelda | 4.61 | 13.0x |
-| Super Mario Bros. 3 | 4.48 | 13.4x |
+| Mega Man | 19.90 | 3.0x |
+| Thwaite | 16.26 | 3.7x |
+| Super Mario Bros. | 16.14 | 3.7x |
+| The Legend of Zelda | 12.19 | 4.9x |
+| Super Mario Bros. 3 | 11.45 | 5.2x |
 
 nesformer's host fast-forwards idle wait loops. With an MMC3 IRQ enabled, that skip now stops
 before the scanline where the host's copy of the IRQ counter says the IRQ will fire, so

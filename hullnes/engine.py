@@ -18,7 +18,7 @@ int64. Nothing here knows about the NES.
 import numpy as np
 from numba import njit
 
-from chipformer.dsl.graph import FFN, ONE, Cumsum, Expr, Graph, Lookup
+from chipformer.dsl.graph import ONE, Cumsum, Expr, Graph, Lookup
 
 K_ATTN, K_SUM, K_FFN = 0, 1, 2
 
@@ -46,9 +46,32 @@ class Compiled:
         h_q, h_kx, h_ky, h_lo, h_hi, h_vptr, h_vform, h_out, h_cap = [], [], [], [], [], [0], [], [], []
         # cumsums
         s_form, s_out = [], []
-        # ffn units
-        u_a, u_b, u_c, u_out = [], [], [], []
+        # ffn units, grouped per sublayer: each unit's relu input is (shared base) + constant,
+        # where the base is the input's linear form without its constant term. Units of one
+        # piecewise-linear function share a base, so each base is evaluated once per sublayer.
+        u_a, u_aconst, u_base, u_bc, u_c, u_out = [], [], [], [], [], []
+        b_form = []  # base forms, in sublayer order
+        level_bases: dict = {}  # base key -> base index, for the sublayer being built
         self.head_names = []
+
+        def unit(cf, a, b, out):
+            if cf != int(cf):
+                raise ValueError(f"non-integer coefficient {cf}")
+            key = tuple(sorted((k, v) for k, v in b.terms.items() if k != ONE))
+            if key not in level_bases:
+                level_bases[key] = len(b_form)
+                b_form.append(form(Expr(dict(key))))
+            u_base.append(level_bases[key])
+            u_bc.append(float(b.terms.get(ONE, 0)))
+            if set(a.terms) <= {ONE}:  # a constant multiplier: no dot product
+                u_a.append(-1)
+                u_aconst.append(float(a.terms.get(ONE, 0)))
+            else:
+                u_a.append(form(a))
+                u_aconst.append(0.0)
+            u_c.append(float(cf))
+            u_out.append(out)
+
         for n in nodes:
             if isinstance(n, Lookup):
                 h_q.append(form(n.q))
@@ -62,22 +85,21 @@ class Compiled:
                 h_vptr.append(len(h_vform))
                 h_cap.append(2 * (n.q_range[1] - n.q_range[0] + 1) + 2)
                 self.head_names.append(n.name)
-                sched.append((K_ATTN, len(h_q) - 1, len(h_q), n.level))
+                sched.append((K_ATTN, len(h_q) - 1, len(h_q), n.level, 0, 0))
             elif isinstance(n, Cumsum):
                 for v, o in zip(n.values, n.out):
                     s_form.append(form(v))
                     s_out.append(o)
-                sched.append((K_SUM, len(s_form) - len(n.values), len(s_form), n.level))
+                sched.append((K_SUM, len(s_form) - len(n.values), len(s_form), n.level, 0, 0))
             else:
-                first = len(u_a)
+                if sched and sched[-1][0] == K_FFN and sched[-1][3] == n.level:
+                    kind, first, _, lvl, b0, _ = sched.pop()  # extend this sublayer's group
+                else:
+                    first, b0 = len(u_a), len(b_form)
+                    level_bases.clear()
                 for cf, a, b in n.terms:
-                    if cf != int(cf):
-                        raise ValueError(f"{n.name}: non-integer coefficient {cf}")
-                    u_a.append(form(a))
-                    u_b.append(form(b))
-                    u_c.append(float(cf))
-                    u_out.append(n.out)
-                sched.append((K_FFN, first, len(u_a), n.level))
+                    unit(cf, a, b, n.out)
+                sched.append((K_FFN, first, len(u_a), n.level, b0, len(b_form)))
         self.out_form = form(g.outputs["next"])
         self.ranges = []
         for e, lo, hi, name in getattr(g, "ranges", []):
@@ -90,8 +112,9 @@ class Compiled:
         self.h_vptr, self.h_vform, self.h_out = i64(h_vptr), i64(h_vform), i64(h_out)
         self.h_cap0 = i64(h_cap)
         self.s_form, self.s_out = i64(s_form), i64(s_out)
-        self.u_a, self.u_b, self.u_c, self.u_out = i64(u_a), i64(u_b), f64(u_c), i64(u_out)
-        self.sched = i64([s[:3] for s in sched])
+        self.u_a, self.u_aconst, self.u_c, self.u_out = i64(u_a), f64(u_aconst), f64(u_c), i64(u_out)
+        self.u_base, self.u_bc, self.b_form = i64(u_base), f64(u_bc), i64(b_form)
+        self.sched = i64([(k, a0, a1, b0, b1) for k, a0, a1, _, b0, b1 in sched])
         self.r_form = i64([r[0] for r in self.ranges])
         self.r_lo = i64([r[1] for r in self.ranges])
         self.r_hi = i64([r[2] for r in self.ranges])
@@ -119,7 +142,7 @@ def _step(v, tdims, tvals, pos, d_pos, d_pos2,
           h_q, h_kx, h_ky, h_lo, h_hi, h_vptr, h_vform, h_out,
           n_m, n_b, n_l, n_r, n_vals, n_count, h_base, h_vbase, tmp,
           s_form, s_out, sums,
-          u_a, u_b, u_c, u_out, out_form,
+          u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, out_form,
           r_form, r_lo, r_hi, check):
     """One position. Returns the output value; on a range violation returns -1 - index."""
     v[:] = 0.0
@@ -130,11 +153,16 @@ def _step(v, tdims, tvals, pos, d_pos, d_pos2,
     v[d_pos2] = float(pos) * float(pos)
     for si in range(sched.shape[0]):
         kind, a0, a1 = sched[si, 0], sched[si, 1], sched[si, 2]
-        if kind == 2:  # ReGLU units
+        if kind == 2:  # ReGLU units: shared bases first, then each unit's relu and multiplier
+            b0, b1 = sched[si, 3], sched[si, 4]
+            for k in range(b0, b1):
+                bval[k] = _dot(b_form[k], v, e_ptr, e_dim, e_coef)
             for u in range(a0, a1):
-                b = _dot(u_b[u], v, e_ptr, e_dim, e_coef)
+                b = bval[u_base[u]] + u_bc[u]
                 if b > 0.0:
-                    v[u_out[u]] += u_c[u] * _dot(u_a[u], v, e_ptr, e_dim, e_coef) * b
+                    fa = u_a[u]
+                    a = u_aconst[u] if fa < 0 else _dot(fa, v, e_ptr, e_dim, e_coef)
+                    v[u_out[u]] += u_c[u] * a * b
         elif kind == 1:  # running sums
             for k in range(a0, a1):
                 sums[k] += _dot(s_form[k], v, e_ptr, e_dim, e_coef)
@@ -235,7 +263,7 @@ def _run(toks, t_ptr, t_dim, t_val, pos0, out, v, d_pos, d_pos2,
          e_ptr, e_dim, e_coef, sched,
          h_q, h_kx, h_ky, h_lo, h_hi, h_vptr, h_vform, h_out,
          n_m, n_b, n_l, n_r, n_vals, n_count, h_base, h_vbase, tmp,
-         s_form, s_out, sums, u_a, u_b, u_c, u_out, out_form, r_form, r_lo, r_hi, check):
+         s_form, s_out, sums, u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, out_form, r_form, r_lo, r_hi, check):
     """Teacher-forced batch: feed toks (indices into the t_* embedding table)."""
     for i in range(toks.shape[0]):
         k = toks[i]
@@ -243,7 +271,7 @@ def _run(toks, t_ptr, t_dim, t_val, pos0, out, v, d_pos, d_pos2,
                   d_pos, d_pos2, e_ptr, e_dim, e_coef, sched,
                   h_q, h_kx, h_ky, h_lo, h_hi, h_vptr, h_vform, h_out,
                   n_m, n_b, n_l, n_r, n_vals, n_count, h_base, h_vbase, tmp,
-                  s_form, s_out, sums, u_a, u_b, u_c, u_out, out_form, r_form, r_lo, r_hi, check)
+                  s_form, s_out, sums, u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, out_form, r_form, r_lo, r_hi, check)
         out[i] = y
         if y < 0:
             return i + 1
@@ -295,6 +323,7 @@ class Engine:
         self.tmp = np.zeros(max(1, int(nv.max())), np.float64)
         self.sums = np.zeros(len(cp.s_form), np.float64)
         self.v = np.zeros(cp.n_dims, np.float64)
+        self.bval = np.zeros(max(1, len(cp.b_form)), np.float64)
         self.pos = 0
         self.max_positions = max_positions
         self._emb: dict[int, tuple[np.ndarray, np.ndarray]] = {}
@@ -362,7 +391,7 @@ class Engine:
                   self.n_m, self.n_b, self.n_l, self.n_r, self.n_vals, self.n_count,
                   self.h_base, self.h_vbase, self.tmp,
                   cp.s_form, cp.s_out, self.sums,
-                  cp.u_a, cp.u_b, cp.u_c, cp.u_out, cp.out_form,
+                  cp.u_a, cp.u_aconst, cp.u_base, cp.u_bc, cp.b_form, self.bval, cp.u_c, cp.u_out, cp.out_form,
                   cp.r_form, cp.r_lo, cp.r_hi, self.check)
         if y <= -1000000:
             raise ValueError(f"position {self.pos}: query of head "
@@ -396,7 +425,7 @@ class Engine:
                  cp.h_q, cp.h_kx, cp.h_ky, cp.h_lo, cp.h_hi, cp.h_vptr, cp.h_vform, cp.h_out,
                  self.n_m, self.n_b, self.n_l, self.n_r, self.n_vals, self.n_count,
                  self.h_base, self.h_vbase, self.tmp, cp.s_form, cp.s_out, self.sums,
-                 cp.u_a, cp.u_b, cp.u_c, cp.u_out, cp.out_form, cp.r_form, cp.r_lo, cp.r_hi,
+                 cp.u_a, cp.u_aconst, cp.u_base, cp.u_bc, cp.b_form, self.bval, cp.u_c, cp.u_out, cp.out_form, cp.r_form, cp.r_lo, cp.r_hi,
                  self.check)
         self.pos += n
         if n < len(toks) or (n and out[n - 1] < 0):
