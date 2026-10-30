@@ -56,7 +56,7 @@ tokens/s on the same machine (its README reports about 1,650 on the machine it w
 | Size | 933 MB as bf16; 3.3 MB zipped | 3.2 GB (NROM) to 6.0 GB as dense fp64; 1.7 to 1.9 MB zipped |
 | Attention heads | 7 layers of DeltaNet heads | 25 to 28 heads, 2 dims each |
 | Tokens/s, engine alone | 3,617 | about 100,000 (NROM), 97,000 (UxROM), 79,000 (MMC1), 67,000 (MMC3) |
-| Speed vs a real NES, host included | 150-290x slower (its README) | 3.0x to 5.2x slower (table below) |
+| Speed vs a real NES, host included | 150-290x slower (its README) | 2.2x to 4.2x slower (table below) |
 | Mappers | NROM | NROM, UxROM, CNROM, MMC1, MMC3 |
 | Code in RAM | halts | runs |
 
@@ -74,11 +74,11 @@ second.
 
 | Game | Frames/s | Slower than a real NES |
 |---|---|---|
-| Mega Man | 19.90 | 3.0x |
-| Thwaite | 16.26 | 3.7x |
-| Super Mario Bros. | 16.14 | 3.7x |
-| The Legend of Zelda | 12.19 | 4.9x |
-| Super Mario Bros. 3 | 11.45 | 5.2x |
+| Mega Man | 27.74 | 2.2x |
+| Thwaite | 22.07 | 2.7x |
+| Super Mario Bros. | 20.47 | 2.9x |
+| The Legend of Zelda | 14.98 | 4.0x |
+| Super Mario Bros. 3 | 14.38 | 4.2x |
 
 nesformer's host fast-forwards idle wait loops. With an MMC3 IRQ enabled, that skip now stops
 before the scanline where the host's copy of the IRQ counter says the IRQ will fire, so
@@ -172,19 +172,43 @@ The prompt holds the cartridge (`tokens.py`): PRG-ROM as 32 KB to 512 KB of byte
 the initial RAM, registers and PC. A ROM read is the previous-position lookup with a different
 target: `q = 1 + rom_offset` picks out the prompt token at that position.
 
-### 3. The O(log n) attention cache
+### 3. The O(log n) attention cache (where "hull" comes from)
 
-Each past position contributes a line `y = kx*q + ky`, and a query asks which line is highest at
-`q`. That is the upper envelope of a set of lines, the dual of a convex hull, and a
-[Li Chao tree](https://cp-algorithms.com/geometry/convex_hull_trick.html) answers it in
-O(log range) per insert and per query (`engine.py`). Percepta calls their version the
-HullKVCache. Standard attention pays O(t) per token to score every cached key; here a token
-costs the same at position 10 and at position 1,000,000.
+Attention scores each past token by the dot product of the current query with that token's key,
+then (here) picks the best. Every key has 2 numbers, so each past token is a point in the plane
+and the query is a direction; the dot product measures how far a point sits in that direction.
+"Which past token scores highest" becomes "which point sticks out furthest in this direction".
 
-This matters for Percepta's WebAssembly interpreter, whose context grows without bound.
-nesformer does not have the problem: Gated DeltaNet is recurrent, so its per-token cost is
-already constant. hullnes's speedup over nesformer comes from the model being small (section 5),
-not from the hull.
+The point that sticks out furthest in any direction is always on the convex hull, the outline you
+get by stretching a rubber band around all the points. Points inside the band can never win:
+
+```
+        ● <- wins for an "up" query
+      /   \
+     ●  ·  ●   <- hull points (the rubber band)
+    / ·  ·  \     · = interior points: never the answer
+   ●---------●
+```
+
+So only hull points need to be kept, and since they are sorted around the outline, the winner
+for a direction can be found by binary search in O(log n) steps. Standard attention scores all n
+cached keys for every new token. Percepta calls their cache built on this the HullKVCache, and
+hullnes is named after it: hull + NES.
+
+RAM reads are hull queries of a particularly simple kind: the keys `(2k, -k^2)` all lie on a
+downward parabola, every point of a parabola is on its convex hull, and the query for address
+`q` points exactly at the key for `k = q`.
+
+The engine (`engine.py`) uses the dual form. Each key point can equally be drawn as a line,
+`score = kx*q + ky`, and "furthest point in the direction of q" becomes "highest line at
+position q". A [Li Chao tree](https://cp-algorithms.com/geometry/convex_hull_trick.html)
+answers that in O(log range) per insert and per query. Points with a hull and lines with an
+upper envelope are two views of the same problem.
+
+The O(log n) bound matters for Percepta's WebAssembly interpreter, whose context grows without
+bound. nesformer does not have the problem: Gated DeltaNet is recurrent, so its per-token cost is
+already constant. hullnes's speedup over nesformer comes from the model being small (section 5)
+and from an engine that evaluates its sparse layers directly, not from the hull.
 
 ### 4. The program counter
 
