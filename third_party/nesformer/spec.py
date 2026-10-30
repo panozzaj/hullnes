@@ -45,6 +45,8 @@ Token families (payload bit layout, LSB first):
 I/O register index: $2000-$3FFF -> 32 + (addr & 7); $4000-$401F -> addr & 31; $4020-$7FFF -> 40.
 """
 
+from functools import lru_cache
+
 FAMILY_SIZES = [
     ("A", 1 << 13), ("X", 1 << 13), ("Y", 1 << 13), ("ST", 1 << 11), ("RM", 1 << 12),
     ("P", 1 << 9), ("S", 1 << 10), ("NT", 4), ("J", 1 << 15), ("JI", 1 << 15), ("R", 1 << 15),
@@ -68,6 +70,7 @@ ROM_BASE = 0x8000
 IO_OTHER = 40
 
 
+@lru_cache(maxsize=None)  # hullnes: called for every token by the host; ids repeat a lot
 def family(t: int) -> tuple[str, int]:
     if t >= CTRL:
         if t >= VOCAB:
