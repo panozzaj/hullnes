@@ -50,7 +50,7 @@ games.
 
 ### Compared with nesformer
 
-Measured on one core of an Apple Silicon Mac. nesformer's own numba engine runs at 3,617
+Measured on one core of an Apple M3 Max (details under [Speed](#speed)). nesformer's own numba engine runs at 3,617
 tokens/s on the same machine (its README reports about 1,650 on the machine it was built on).
 
 | | nesformer | hullnes |
@@ -62,7 +62,7 @@ tokens/s on the same machine (its README reports about 1,650 on the machine it w
 | Size | 933 MB as bf16; 3.3 MB zipped | 3.2 GB (NROM) to 6.0 GB as dense fp64; 1.7 to 1.9 MB zipped |
 | Attention heads | 7 layers of DeltaNet heads | 25 to 28 heads, 2 dims each |
 | Tokens/s, engine alone | 3,617 | about 146,000 (NROM), 133,000 (UxROM), 114,000 (MMC1), 87,000 (MMC3) |
-| Speed vs a real NES, host included | 150-290x slower (its README) | 1.7x to 3.5x slower (table below) |
+| Speed vs a real NES, host included, idle-loop skip on | 150-290x slower (its README) | 0.83x (Mega Man) to 1.4x slower (table below) |
 | Mappers | NROM | NROM, UxROM, CNROM, MMC1, MMC3 |
 | Code in RAM | halts | runs |
 
@@ -75,20 +75,35 @@ because the attention scores reach about 2^51 and need exact float64 arithmetic.
 
 ### Speed
 
-`scripts/bench.py`, 300 frames per game, host included. A real NES runs at 60 frames per
-second.
+Measured with `scripts/bench.py` on an Apple M3 Max (one core of 14; nothing here is
+multithreaded), 36 GB, macOS 15.7.4, Python 3.14.6, numba 0.68.1, numpy 2.5.4. 300 frames per
+game with a fixed button script, every run checked token for token against the reference CPU.
+"Steady" times frames 30 to 300, after the prompt (all of PRG-ROM) has gone through the model.
+A real NES runs at 60 frames per second.
 
-| Game | Frames/s | Slower than a real NES |
-|---|---|---|
-| Mega Man | 34.49 | 1.7x |
-| Thwaite | 27.96 | 2.1x |
-| Super Mario Bros. | 25.82 | 2.3x |
-| The Legend of Zelda | 19.01 | 3.2x |
-| Super Mario Bros. 3 | 17.09 | 3.5x |
+| Game | Steady fps | vs a real NES | Steady fps, idle-loop skip off |
+|---|---|---|---|
+| Mega Man | 72.3 | 0.83x (faster) | 13.0 |
+| Super Mario Bros. | 48.6 | 1.24x slower | 13.9 |
+| Thwaite | 46.9 | 1.28x slower | 11.5 |
+| The Legend of Zelda | 44.2 | 1.36x slower | 10.9 |
+| Super Mario Bros. 3 | 42.9 | 1.40x slower | 8.6 |
 
-nesformer's host fast-forwards idle wait loops. With an MMC3 IRQ enabled, that skip now stops
-before the scanline where the host's copy of the IRQ counter says the IRQ will fire, so
-Super Mario Bros. 3's status-bar IRQ still arrives on time.
+What these numbers include:
+
+- **nesformer's idle-loop skip.** When a wait loop repeats exactly and writes nothing, the host
+  fast-forwards the clock to the next PPU event, so the model does not predict those
+  iterations. nesformer's own numbers (150-290x slower) are with the skip on, so the first two
+  columns compare like with like. With the skip off the model predicts every iteration, 3.1M
+  to 3.8M tokens per 300 frames instead of 0.6M to 1.0M. With an MMC3 IRQ enabled, the skip
+  stops before the scanline where the host's copy of the IRQ counter says the IRQ will fire.
+- **A compiled host.** `hullnes/fastrun.py` runs the transformer step and the host's
+  bookkeeping (cycles, PPU registers and scanlines, mapper board, the skip) in one numba loop.
+  The host still sees only the token stream, as nesformer's does. `run_model(..., fast=False)`
+  uses the Python host; a test requires both to give the same tokens and frames.
+- **A sparse engine.** `hullnes/engine.py` evaluates the same weights the dense check runs,
+  skipping zeros, computing each shared ReLU input once, and evaluating each piecewise-linear
+  function by binary search over its thresholds.
 
 ### Correctness checks
 
