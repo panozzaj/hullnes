@@ -62,6 +62,8 @@ def main():
     p.add_argument("--turns", type=int, default=40)
     p.add_argument("--boot", type=int, default=260, help="frames to run after Start before the "
                    "model takes over")
+    p.add_argument("--boot-buttons", default="start@40-45", help="inputs during --boot")
+    p.add_argument("--auto-look", action="store_true", help="attach the screen to every step")
     p.add_argument("--host", default="http://localhost:11434")
     a = p.parse_args()
     out = Path("tmp/llm") / time.strftime("%Y%m%d-%H%M%S")
@@ -73,7 +75,7 @@ def main():
         log.write(s + "\n\n")
         log.flush()
 
-    sv, _ = _run(a.rom, None, None, a.boot, "start@40-45")
+    sv, _ = _run(a.rom, None, None, a.boot, a.boot_buttons)
     states = {"s0": out / "s0.pkl"}
     save(sv, states["s0"], out / "s0.png")
     cur = "s0"
@@ -112,6 +114,9 @@ def main():
                     save(sv, states[cur], out / f"{cur}.png")
                     res = f"state {cur} (from {base}): {describe(sv)}\n" + "\n".join(
                         f"${k:04X} = {v}" for k, v in writers.items())
+                    if a.auto_look:
+                        images = [base64.b64encode((out / f"{cur}.png").read_bytes()).decode()]
+                        res += "\n(screen attached)"
                 elif fn == "ram":
                     res = ram_dump(load(states[cur]), str(args.get("ranges", "")).split())
                 elif fn == "look":
