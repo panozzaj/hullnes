@@ -115,8 +115,8 @@ class Host:
             self.rec_start = False
             self.rec_dma = False
             self.rec_cycles = self.cycles
-            self.in_nmi = fam == "NMI"
-            self.rec_op = None if fam in ("NMI", "R", "RL") else p & 255 if fam == "OPF" \
+            self.in_nmi = fam in ("NMI", "IRQ")  # hullnes: IRQ (MMC3) records are the same shape
+            self.rec_op = None if fam in ("NMI", "IRQ", "R", "RL") else p & 255 if fam == "OPF" \
                 else self.cart.prg[self.pc & 0x7FFF]  # hullnes: OPF is the opcode of RAM code
         if fam == "IOW":
             self.io_write(p >> 8 & 63, p & 255)

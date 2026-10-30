@@ -281,7 +281,7 @@ class Cpu:
             if ea >= 0x8000 and self.board is not None and self.board.number != 0:
                 p = self.board.write(ea, v)
                 self.commit(ln)
-                yield S.tok("MAP", p | ln << 11)
+                yield S.tok("MAP", p | ln << 14)
                 return
             if self.is_io(ea):
                 self.commit(ln)
@@ -324,7 +324,7 @@ class Cpu:
                 yield S.tok("RM", r | c << 8 | (ea >> 7 & 1) << 9)
                 p = self.board.write(ea, m if self.board.number == 1 else r)
                 self.commit(ln)
-                yield S.tok("MAP", p | ln << 11)
+                yield S.tok("MAP", p | ln << 14)
                 return
             f["N"], f["Z"], f["C"] = r >> 7, int(r == 0), c
             self.commit(ln)
@@ -466,3 +466,7 @@ class Cpu:
     def nmi_record(self):
         """The record after an injected NMI token."""
         yield from self.interrupt(self.pc, 0xFFFA, 0)
+
+    def irq_record(self):
+        """hullnes: the record after an injected IRQ token (the host checked I = 0)."""
+        yield from self.interrupt(self.pc, 0xFFFE, 0)

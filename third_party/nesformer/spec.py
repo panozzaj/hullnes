@@ -28,7 +28,7 @@ Token families (payload bit layout, LSB first):
                                           write to $4014 has LEN 0 and starts OAM DMA:
   DM              byte(8) index(8)        byte `index` of the page; after the 256th, NT(LEN)
                                           ends the record
-  MAP     final   payload(11) LEN(2)      (hullnes) a store to a mapper board's registers at
+  MAP     final   payload(14) LEN(2)      (hullnes) a store to a mapper board's registers at
                                           $8000-$FFFF; hullnes/mapper.py defines the payload
   (hullnes) code in RAM ($0000-$1FFF, PRG-RAM $6000-$7FFF). A record whose PC is below $8000
   starts by reading its instruction bytes into the trace:
@@ -48,7 +48,7 @@ FAMILY_SIZES = [
     ("A", 1 << 13), ("X", 1 << 13), ("Y", 1 << 13), ("ST", 1 << 11), ("RM", 1 << 12),
     ("P", 1 << 9), ("S", 1 << 10), ("NT", 4), ("J", 1 << 15), ("JI", 1 << 15), ("R", 1 << 15),
     ("LO", 256), ("HI", 256), ("PSH", 1 << 10), ("PUL", 256), ("IOR", 64), ("IN", 256),
-    ("IOW", 1 << 16), ("DM", 1 << 16), ("MAP", 1 << 13),
+    ("IOW", 1 << 16), ("DM", 1 << 16), ("MAP", 1 << 16),
     ("OPF", 512), ("OB1", 512), ("OB2", 256), ("JL", 1 << 15), ("RL", 1 << 15),
 ]
 FAMILIES = {}
@@ -57,7 +57,7 @@ for _n, _s in FAMILY_SIZES:
     FAMILIES[_n] = (_base, _s)
     _base += _s
 CTRL = _base
-CONTROL_NAMES = ["NMI", "HALT", "GO"]
+CONTROL_NAMES = ["NMI", "HALT", "GO", "IRQ"]  # hullnes: IRQ (an MMC3 scanline IRQ)
 CONTROLS = {n: CTRL + i for i, n in enumerate(CONTROL_NAMES)}
 VOCAB = CTRL + len(CONTROL_NAMES)
 PAD = VOCAB  # the zero prefix token of a run (an all-zero embedding row)
@@ -124,7 +124,7 @@ def length_of(t: int) -> int:
     if fam == "IOW":
         return p >> 14
     if fam == "MAP":
-        return p >> 11
+        return p >> 14
     return 0
 
 
@@ -185,7 +185,7 @@ def name(t: int) -> str:
     if fam == "NT":
         return f"NT(L{p})"
     if fam == "MAP":
-        return f"MAP(${p & 0x7FF:03X} L{p >> 11})"
+        return f"MAP(${p & 0x3FFF:04X} L{p >> 14})"
     if fam == "IOR":
         reg = f"${0x2000 + p - 32:04X}" if 32 <= p < 40 else f"${0x4000 + p:04X}" if p < 32 \
             else "$4020+"
