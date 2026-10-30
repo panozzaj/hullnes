@@ -24,10 +24,10 @@ on the same machine (its README reports about 1,650 on the machine it was built 
 |---|---|---|
 | Architecture | `Qwen3_5ForCausalLM` (7 Gated DeltaNet layers) | plain decoder, 10 layers, 2D hardmax heads, ReGLU |
 | Memory | DeltaNet state rows, fixed size | the token trace, read by attention |
-| Residual width | 768 | 455 (NROM) to 519 (MMC1, 256 KB) |
-| Nonzero weights | 9.3M | 27k (NROM) to 48k (MMC1, 256 KB) |
+| Residual width | 768 | 461 (NROM) to 557 (MMC1, 256 KB) |
+| Nonzero weights | 9.3M | 23k (NROM) to 39k (MMC1, 256 KB) |
 | Attention heads | 7 layers of DeltaNet heads | 25 to 28 heads, 2 dims each |
-| Tokens/s, engine alone | 3,617 | 25,000 (NROM), 24,000 (UxROM), 17,000 (MMC1) |
+| Tokens/s, engine alone | 3,617 | 33,000 (NROM), 31,000 (UxROM), 22,000 (MMC1) |
 | Speed vs a real NES, with the host | 150-290x slower (its README) | 6x (Mega Man) to 11x (Super Mario Bros., Zelda) slower |
 | Mappers | NROM | NROM, UxROM, CNROM, MMC1 |
 | Code in RAM | halts | runs (Zelda and Kid Icarus need it) |

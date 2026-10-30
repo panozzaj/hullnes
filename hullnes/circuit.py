@@ -265,6 +265,34 @@ def board_states(c: NesCircuit, tf, is_map):
     return [([MODE[m], PRG[p]], idx(m, p)) for m in range(4) for p in range(n16)], extra
 
 
+def region_banks(c: NesCircuit, states):
+    """Per 16 KB region ($8000, $C000) and bank: a literal "this bank is mapped there" and the
+    ROM-head position of an address a ($8000-$FFFF) when it is (else 0). Each bank's literal is
+    one FFN node over the board states that map it (layer 1), so the ROM queries need one
+    gated function per bank instead of one per board state."""
+    rom_pos = c.cfg.layout.rom_pos
+    out = []
+    for r, lo in enumerate((0x8000, 0xC000)):
+        by_bank: dict[int, list] = {}
+        for lits, ix in states:
+            b = ix(lo) // BANK
+            for a in (lo, lo + 0x1234, lo + 0x3FFF):
+                assert ix(a) == b * BANK + (a & 0x3FFF), "PRG index must be bank * 16K + offset"
+            by_bank.setdefault(b, []).append(lits)
+        for b, group in sorted(by_bank.items()):
+            if group == [[]]:
+                lit = []  # a fixed bank
+            elif len(group) == 1 and len(group[0]) == 1:
+                lit = group[0]
+            else:
+                lit = [c.ffn([(1, c.one, c.AND(g)) for g in group], f"bank{r}={b}")]
+
+            def g(a, r=r, b=b):
+                return rom_pos + b * BANK + (a & 0x3FFF) if (a >= 0xC000) == bool(r) else 0
+            out.append((lit, g))
+    return out
+
+
 def build(cfg: Config = Config()) -> NesCircuit:
     def ram_code(a: int) -> bool:  # an address below $8000 where code may run
         return a < 0x2000 or (cfg.prgram and 0x6000 <= a < 0x8000)
@@ -285,6 +313,10 @@ def build(cfg: Config = Config()) -> NesCircuit:
     is_anc = tf("is_anchor", isf("J", "JI", "R", "JL", "RL"))
     f_anc = tf("anchor", lambda fm, p: S.anchor_addr(fm, p) if fm in ("J", "JI", "R", "JL", "RL")
                else 0)
+    f_anc_lo = tf("anchor.lo", lambda fm, p: S.anchor_addr(fm, p) & 255
+                  if fm in ("J", "JI", "R", "JL", "RL") else 0)
+    f_anc_hi = tf("anchor.hi", lambda fm, p: S.anchor_addr(fm, p) >> 8
+                  if fm in ("J", "JI", "R", "JL", "RL") else 0)
     is_ = {fm: tf(f"is_{fm}", isf(fm)) for fm in
            ["A", "X", "Y", "LO", "HI", "IN", "IOR", "IOW", "DM", "PSH", "PUL", "P", "ST", "RM",
             "NMI", "GO", "RB", "RI", "MAP", "OPF", "OB1", "OB2"]}
@@ -382,6 +414,7 @@ def build(cfg: Config = Config()) -> NesCircuit:
     (nf,) = c.latest(is_fetch + f_fin, [f_nf], "latch.n")
     states, extra = board_states(c, tf, is_["MAP"])
     c.map_dims = extra.get("map_dims", {})
+    banks = region_banks(c, states)
 
     # =========================================================================== L1 ffn
     j = pos - fpos - nf  # tokens of the current record so far (after any instruction fetch)
@@ -407,7 +440,7 @@ def build(cfg: Config = Config()) -> NesCircuit:
     decY = c.pwl(Y, 0, 255, lambda v: (v - 1) & 255, "Y-1")
 
     # =========================================================================== L2
-    anc, Ba = c.latest(is_anc, [f_anc, B], "anchor")
+    anc, Ba, anc_lo, anc_hi = c.latest(is_anc, [f_anc, B, f_anc_lo, f_anc_hi], "anchor")
     off = B - Ba
     u = anc + off  # the PC, before wrapping at 16 bits
     UH = 0xFFFF + 64
@@ -416,11 +449,12 @@ def build(cfg: Config = Config()) -> NesCircuit:
     pc2 = c.pwl(u, 0, UH, lambda v: (v + 2) & 0xFFFF, "pc+2")
     pc_ram = c.pwl(u, 0, UH, lambda v: int(v & 0xFFFF < 0x8000), "pc<8000")
 
-    # ROM-head queries for PC, PC + 1, PC + 2 under each board state (0: code in RAM)
-    def fetch_f(k, ix):
-        return lambda v: 0 if v & 0xFFFF < 0x8000 else lay.rom_pos + ix(0x8000 | ((v + k) & 0x7FFF))
+    # ROM-head queries for PC, PC + 1, PC + 2, one gated function per (region, bank)
+    # (0: code in RAM)
+    def fetch_f(k, g):
+        return lambda v: 0 if v & 0xFFFF < 0x8000 else g(0x8000 | ((v + k) & 0x7FFF))
 
-    fetch_q = [c.pwl_cases(u, 0, UH, [(lits, fetch_f(k, ix)) for lits, ix in states],
+    fetch_q = [c.pwl_cases(u, 0, UH, [(lits, fetch_f(k, g)) for lits, g in banks],
                            f"fetch.q{k}") for k in range(3)]
     REF = c.pwl(off, 0, 200, lambda v: int(v >= S.OFF_MAX), "refresh")
     JJ1, JJ2, JJ3 = (c.eq(jj, k, f"jj=={k}") for k in (1, 2, 3))
@@ -472,9 +506,12 @@ def build(cfg: Config = Config()) -> NesCircuit:
     jt_rom = c.pwl(jr, -128, 0xFFFF + 130, lambda v: int(v & 0xFFFF >= 0x8000), "jt.rom")
     jt_ram = c.pwl(jr, -128, 0xFFFF + 130, lambda v: int(ram_code(v & 0xFFFF)), "jt.ram")
     abs_ram = c.pwl(b2, 0, 255, lambda v: int(ram_code(v << 8)), "abs.ram")  # code in RAM ok
-    r = pc + 2 - 2 * NM  # return address (pc + 2, or pc for NMI)
-    pch = c.pwl(r, 0, 0x10001, lambda v: (v & 0xFFFF) >> 8, "pch")
-    pcl = c.pwl(r, 0, 0x10001, lambda v: v & 255, "pcl")
+    # return address bytes (pc + 2, or pc for NMI), from the anchor's bytes: the low byte plus
+    # the small offset carries at most once into the high byte
+    rs = anc_lo + off + 2 - 2 * NM
+    pcl = c.pwl(rs, 0, 255 + 66, lambda v: v & 255, "pcl")
+    pch = anc_hi + c.step(rs - 256, "pcl.carry") - 256 * c.step(rs - 256 + 512 * (anc_hi - 255),
+                                                                   "pch.wrap")
     xs = c.ffn([(1, one, c.AND([f_fin, 1 - REF, 1 - pc_ram])), (1, one, f_last)], "exec_start")
     fetch_last = c.pwl(LEN, 0, 3, lambda v: int(v == 2), "fetch.len2")
     sval = c.sel([([MN["STA"]], A), ([MN["STX"]], X), ([MN["STY"]], Y)], "store.val")
@@ -547,8 +584,8 @@ def build(cfg: Config = Config()) -> NesCircuit:
         return ram_key(a) if a < 0x2000 or cfg.io_end <= a < 0x8000 else cfg.k_null
 
     q_ram = c.pwl(qa, 0, 0xFFFF, ram_key, "ram.q")
-    q_rom = c.pwl_cases(qa, 0, 0xFFFF, [(lits, lambda a, ix=ix: 0 if a < 0x8000 else
-                                         lay.rom_pos + ix(a)) for lits, ix in states], "rom.q")
+    q_rom = c.pwl_cases(qa, 0, 0xFFFF, [(lits, lambda a, g=g: 0 if a < 0x8000 else g(a))
+                                        for lits, g in banks], "rom.q")
     ge = {b: c.pwl(qa, 0, 0xFFFF, lambda v, b=b: int(v >= b), f"qa>={b:X}")
           for b in (0x2000, 0x4000, 0x4020, cfg.io_end, 0x8000)}
     r_io = ge[0x2000] - ge[cfg.io_end]
