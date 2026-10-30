@@ -1,72 +1,157 @@
 # hullnes
 
-An NES CPU compiled into the weights of a small vanilla transformer, decoded with an
-O(log n) attention cache. It applies the construction from Percepta's
-[Can LLMs Be Computers?](https://www.percepta.ai/blog/can-llms-be-computers) to the NES
-emulator in [nesformer](https://github.com/dbreunig/nesformer), and reuses most of
-nesformer's trace format, reference CPU and host.
+An NES CPU compiled into the weights of a small vanilla transformer with 2D hardmax attention
+heads, decoded with an O(log n) attention cache. Nobody trained these weights; a compiler
+computed every one. The construction is the one from Percepta's
+[Can LLMs Be Computers?](https://www.percepta.ai/blog/can-llms-be-computers), applied to the
+NES.
 
-What runs in the weights: the 6502 core (all official opcodes), 2 KB of work RAM, 8 KB of
-cartridge RAM, PRG-ROM up to 512 KB, and the CPU side of five mapper boards (NROM, UxROM,
-CNROM, MMC1, MMC3). The PPU, controllers, NMI timing and MMC3's scanline counter run in a host
-program, as in nesformer. Nobody trained these weights; a compiler computed every one. The
-same weights, run as a plain softmax transformer with no custom attention code, reproduce the
-trace too (`python -m hullnes dense`).
+hullnes builds directly on [nesformer](https://github.com/dbreunig/nesformer) by
+[Drew Breunig](https://www.dbreunig.com/) ([`@dbreunig`](https://github.com/dbreunig)), posted
+as "Show HN: A working Nintendo in ~1GB of Qwen weights". nesformer compiled the same CPU into a
+Qwen3.5 checkpoint. hullnes reuses its trace format, reference 6502 CPU, host (PPU, controllers,
+NMI timing), test ROMs and nestest checks, vendored with modifications in `third_party/nesformer`.
+hullnes exists because nesformer made a direct comparison possible: on the games nesformer
+supports, both models emit the same tokens and are checked against the same reference CPU. See [Credits](#credits) for the other
+projects it draws on.
 
-Checked token for token against a reference 6502: Super Mario Bros., Super Mario Bros. 3,
-Mega Man, Mega Man 2, Mega Man 3, Metroid, The Legend of Zelda, Kid Icarus, Kirby's Adventure,
-Castlevania, Contra and DuckTales, plus nestest and the two homebrew games nesformer ships.
+| Thwaite | Full Game |
+|---|---|
+| ![Thwaite running on hullnes](docs/media/thwaite.gif) | ![Full Game running on hullnes](docs/media/full_game.gif) |
+
+Both GIFs are homebrew games included in `roms/` (see [Test ROMs](#test-roms)). Commercial ROMs
+are not included; to run a commercial game, supply your own `.nes` file.
+
+## What runs in the weights
+
+- the 6502 core, all official opcodes
+- 2 KB of work RAM and 8 KB of cartridge RAM
+- PRG-ROM up to 512 KB
+- the CPU side of five mapper boards: NROM, UxROM, CNROM, MMC1 (up to 256 KB of PRG) and MMC3
+  (up to 512 KB of PRG)
+- code running from RAM (Zelda and Kid Icarus need it)
+
+The PPU, controllers, NMI timing and MMC3's scanline counter run in a host program, as in
+nesformer. The same weights, run as plain dense matrices with ordinary softmax attention and no
+custom attention code, reproduce the trace too (`python -m hullnes dense`).
+
+Checked token for token against the reference CPU, teacher-forced or free-running: Super Mario
+Bros., Super Mario Bros. 3, Mega Man, Mega Man 2, Mega Man 3, Metroid, The Legend of Zelda, Kid
+Icarus, Kirby's Adventure, Castlevania, Contra and DuckTales, plus nestest and the two homebrew
+games.
 
 ## Results
 
-Measured on one core of an Apple Silicon Mac. nesformer's numba engine runs at 3,617 tokens/s
-on the same machine (its README reports about 1,650 on the machine it was built on).
+### Compared with nesformer
+
+Measured on one core of an Apple Silicon Mac. nesformer's own numba engine runs at 3,617
+tokens/s on the same machine (its README reports about 1,650 on the machine it was built on).
 
 | | nesformer | hullnes |
 |---|---|---|
 | Architecture | `Qwen3_5ForCausalLM` (7 Gated DeltaNet layers) | plain decoder, 10 layers, 2D hardmax heads, ReGLU |
 | Memory | DeltaNet state rows, fixed size | the token trace, read by attention |
-| Residual width | 768 | 461 (NROM) to 860 (MMC3, 512 KB) |
-| Nonzero weights | 9.3M | 23k (NROM) to 55k (MMC3, 512 KB) |
+| Residual width | 768 | 463 (NROM) to 860 (MMC3, 512 KB) |
+| Nonzero weights | 9.3M of 466.6M parameters (about 1 GB) | about 23k (NROM) to 55k (MMC3, 512 KB) |
 | Attention heads | 7 layers of DeltaNet heads | 25 to 28 heads, 2 dims each |
-| Tokens/s, engine alone | 3,617 | 33,000 (NROM), 31,000 (UxROM), 22,000 (MMC1), 14,000 to 18,000 (MMC3) |
-| Speed vs a real NES, with the host | 150-290x slower (its README) | 6x (Mega Man) to 11x (Super Mario Bros., Zelda) slower |
+| Tokens/s, engine alone | 3,617 | about 33,000 (NROM), 31,000 (UxROM), 22,000 (MMC1), 14,000 to 18,000 (MMC3) |
+| Speed vs a real NES, host included | 150-290x slower (its README) | 6.4x to 13.4x slower (table below) |
 | Mappers | NROM | NROM, UxROM, CNROM, MMC1, MMC3 |
-| Code in RAM | halts | runs (Zelda and Kid Icarus need it) |
+| Code in RAM | halts | runs |
 
-Checks (all in `tests/` or reproducible with `python -m hullnes check`):
+As dense matrices, the hullnes weights have 2.7M to 12.3M entries, nearly all zero (not counting
+the embedding table, which is sparse).
+
+### Speed
+
+`scripts/bench.py`, 300 frames per game, host included. A real NES runs at 60 frames per
+second.
+
+| Game | Frames/s | Slower than a real NES |
+|---|---|---|
+| Mega Man | 9.40 | 6.4x |
+| Thwaite | 7.70 | 7.8x |
+| Super Mario Bros. | 7.22 | 8.3x |
+| The Legend of Zelda | 4.61 | 13.0x |
+| Super Mario Bros. 3 | 4.48 | 13.4x |
+
+nesformer's host fast-forwards idle wait loops. With an MMC3 IRQ enabled, that skip now stops
+before the scanline where the host's copy of the IRQ counter says the IRQ will fire, so
+Super Mario Bros. 3's status-bar IRQ still arrives on time.
+
+### Correctness checks
+
+All of these are in `tests/` or reproducible with `python -m hullnes check`:
 
 - Teacher-forced on nestest and 60k tokens of each homebrew game, with a range check on the
   input of every piecewise-linear unit.
-- Free-running 900k tokens of Full Game and Thwaite: every token and every rendered frame equal
-  to the reference CPU's, including across forced context rollovers.
-- Free-running 400k tokens of Super Mario Bros. and 1.5M of Super Mario Bros. 3 (through its
-  status-bar IRQs): identical tokens and frames.
-- Teacher-forced 300k to 600k tokens of each of the other commercial games above: 0
-  mismatches.
+- Free-running 900k tokens each of Full Game and Thwaite: every token and every rendered frame
+  equal to the reference CPU's. This holds across forced context rollovers too.
+- Free-running 400k tokens of Super Mario Bros., 1.5M of Super Mario Bros. 3 (through its
+  status-bar IRQs) and 2M of Kirby's Adventure: identical tokens and frames.
+- Teacher-forced 300k to 600k tokens of each of the other commercial games above: 0 mismatches.
 - The dense softmax model (`hullnes/dense.py`), teacher-forced: nestest (4,600 tokens) and
   Thwaite (20,000 tokens, with NMIs, I/O reads and sprite DMA), 0 mismatches. Its output stays
   within 4e-8 of an integer.
 
+## Usage
+
+Install with [uv](https://docs.astral.sh/uv/), then run the CLI:
+
+```bash
+uv sync
+
+# Play a homebrew game and save a GIF
+uv run python -m hullnes run roms/thwaite.nes --frames 600 \
+  --buttons "start@90-95+200-205,a@230-233+250-253" --gif out.gif
+
+# A commercial game (supply your own ROM)
+uv run python -m hullnes run ~/roms/smb.nes --frames 600 \
+  --buttons "start@60-65,right@200-600,a@250-265+300-315" --gif smb.gif
+
+uv run python -m hullnes check GAME.nes --tokens 300000   # free-run, compared with the reference CPU
+uv run python -m hullnes trace GAME.nes --tokens 40       # print the first tokens of the trace
+uv run python -m hullnes info GAME.nes                    # model size for that board
+uv run python -m hullnes why GAME.nes 0086 075A           # which instruction last wrote these RAM bytes
+uv run python -m hullnes dense GAME.nes --tokens 3000     # run as a plain softmax transformer
+uv run python -m hullnes hunt GAME.nes --fork-frame 300 --branches 8   # prototype glitch hunt
+```
+
+`--buttons` follows nesformer's syntax: `button@first-last` frame ranges, `+` to combine.
+
+`why` answers with one query of the RAM head, the same lookup the CPU does on every read.
+`hunt` forks the context at a frame (a savestate is a prompt), tries random inputs on each
+branch, and flags branches whose traces look unusual. [docs/IDEAS.md](docs/IDEAS.md) describes
+both and where they could go.
+
+Tests and benchmarks:
+
+```bash
+uv run pytest -q                       # commercial-game tests run when NES_ROMS points at a directory of .nes files
+HULLNES_SLOW=1 uv run pytest -q        # also run the dense softmax test
+uv run scripts/bench.py LABEL          # benchmark, saved under LABEL
+uv run scripts/bench.py --compare A B  # compare two saved runs
+```
+
 ## How it works
 
-This section is written to be read in order. Each idea builds on the previous one.
+This section is meant to be read in order; each part builds on the previous one.
 
 ### 1. The trace
 
-The model emits one record per instruction, nesformer's format unchanged:
-`LDX #$40` becomes `X($40 c0 v0 px0 L2)`, a store becomes `ST($00 a7=0 L2)`, a `JSR` becomes
+The model emits one record per instruction, in nesformer's format unchanged: `LDX #$40` becomes
+`X($40 c0 v0 px0 L2)`, a store becomes `ST($00 a7=0 L2)`, and a `JSR` becomes
 `PSH PSH J($8279)`. Every token is a state change: a register's new value, a memory write, a
 push, a jump. Most instructions are one token. The host injects two kinds of token: `IN` (the
 answer to an I/O read) and `NMI` (vblank).
 
 Tokens are never overwritten, so the current state of the machine is "the latest token that
-wrote each thing". That makes every read a lookup into the past, which is what attention does.
+wrote each thing". Every read is then a lookup into the past, which is what attention does.
 
 ### 2. Memory lookups with 2D hardmax heads
 
-Each head here has a 2-dimensional query `(q, 1)` and key `(kx, ky)`, and returns the value of
-the single position that maximizes `q*kx + ky` (hardmax; softmax at a high temperature gives
+Each head has a 2-dimensional query `(q, 1)` and key `(kx, ky)`, and returns the value of the
+single position that maximizes `q*kx + ky` (hardmax; softmax at a low enough temperature gives
 the same answer). Three lookups cover everything the CPU needs:
 
 - **Latest of a family** (registers, flags): `kx = 0`, `ky = position - BIG*(1 - flag)`. The
@@ -78,28 +163,28 @@ the same answer). Three lookups cover everything the CPU needs:
   wins by a margin of at least `T`, and among writes to the same address the latest wins,
   because `T` exceeds every position. That is RAM.
 
-The prompt holds the cartridge (`tokens.py`): PRG-ROM as 32 KB to 256 KB of byte tokens,
-then the initial RAM, registers and PC. A ROM read is the previous-position trick with a
-different target: `q = 1 + rom_offset` picks out the prompt token at that position.
+The prompt holds the cartridge (`tokens.py`): PRG-ROM as 32 KB to 512 KB of byte tokens, then
+the initial RAM, registers and PC. A ROM read is the previous-position lookup with a different
+target: `q = 1 + rom_offset` picks out the prompt token at that position.
 
 ### 3. The O(log n) attention cache
 
-Each past position contributed a line `y = kx*q + ky`. A query asks which line is highest at
+Each past position contributes a line `y = kx*q + ky`, and a query asks which line is highest at
 `q`. That is the upper envelope of a set of lines, the dual of a convex hull, and a
 [Li Chao tree](https://cp-algorithms.com/geometry/convex_hull_trick.html) answers it in
 O(log range) per insert and per query (`engine.py`). Percepta calls their version the
 HullKVCache. Standard attention pays O(t) per token to score every cached key; here a token
-costs the same at position 10 and position 1,000,000.
+costs the same at position 10 and at position 1,000,000.
 
 This matters for Percepta's WebAssembly interpreter, whose context grows without bound.
-nesformer sidesteps the problem: Gated DeltaNet is recurrent, so its per-token cost is
-already constant. The speedup here comes from the model being small (section 5), not from the
-hull.
+nesformer does not have the problem: Gated DeltaNet is recurrent, so its per-token cost is
+already constant. hullnes's speedup over nesformer comes from the model being small (section 5),
+not from the hull.
 
 ### 4. The program counter
 
-Final tokens carry the instruction length. A cumulative-sum head (uniform attention times
-the position, Percepta's construction) gives the bytes executed so far, and the PC is
+Final tokens carry the instruction length. A cumulative-sum head (uniform attention times the
+position, Percepta's construction) gives the bytes executed so far, and the PC is
 `anchor + (bytes now - bytes at the anchor)`, where the anchor is the latest jump.
 
 ### 5. Arithmetic in ReGLU units
@@ -107,19 +192,20 @@ the position, Percepta's construction) gives the bytes executed so far, and the 
 The feed-forward layers are ReGLU units `c * a * relu(b)`. On integer inputs:
 
 - `relu(x + 1) - relu(x)` is the step function `[x >= 0]`.
-- `relu(l1 + l2 - 1)` is AND of two 0/1 literals, so a case with five conditions is one unit.
-- Any integer function `f(z)` on a range is the piecewise-linear interpolation of its values:
+- `relu(l1 + l2 - 1)` is the AND of two 0/1 literals, so a case with five conditions is one
+  unit.
+- Any integer function `f(z)` on a range is the piecewise-linear interpolation of its values, at
   one unit per change of slope. `z mod 256`, bit 7 of `z`, `z^2` and "is this address in I/O
-  space" are all one FFN node.
+  space" are each one FFN node.
 - Adding `BIG*(gate - 1)` to every relu argument switches a whole function off unless the gate
   holds. Banked ROM queries use this: one gated function per bank state, summed.
 
-The opcode decode costs nothing: a ROM byte's embedding already contains its meaning as an
+Opcode decoding costs no layers. A ROM byte's embedding already contains its meaning as an
 opcode (mnemonic and addressing-mode one-hots), so the fetch head returns the decoded
 instruction directly.
 
-The output token is a sum over 135 to 160 mutually exclusive cases (depending on the board), each one unit:
-`token_expression * relu(AND(conditions))`. The unembedding row for token `v` is
+The output token is a sum over 135 to 160 mutually exclusive cases (depending on the board),
+each one unit: `token_expression * relu(AND(conditions))`. The unembedding row for token `v` is
 `2v*next - v^2`, so the logits peak at `v = next`.
 
 ### 6. Layer plan
@@ -137,72 +223,54 @@ The output token is a sum over 135 to 160 mutually exclusive cases (depending on
 | 9 | | BIT's Z flag |
 | 10 | | the next token |
 
-A write's key has to be squared for its key line (`-Tk^2`), and a
-square costs one unit per value, so a 10 KB key space would cost 10k units. The key travels
-as two bytes instead: `k^2 = 65536h^2 + 512hl + l^2`, where `h*l` is a single ReGLU unit and
-the squares are tables of at most 41 and 256 entries. A read of ROM and a read of RAM go to
-different heads, and each head reads a zero cell when the address belongs to the other, so the
-operand is `ram + rom` without a selection layer.
+A write's key has to be squared for its key line (`-Tk^2`), and a square costs one unit per
+value, so a 10 KB key space would cost 10k units. The key travels as two bytes instead:
+`k^2 = 65536h^2 + 512hl + l^2`, where `h*l` is a single ReGLU unit and the squares are tables of
+at most 41 and 256 entries.
+
+ROM reads and RAM reads go to different heads, and each head reads a zero cell when the address
+belongs to the other, so the operand is `ram + rom` with no selection layer.
 
 ### 7. Mappers and code in RAM
 
-A store to `$8000-$FFFF` on a mapper board becomes a `MAP` token whose payload says what the
-write did. For MMC1 that includes the serial shift register (five writes per register), so
-the model computes the shift state and the host reads CHR banks and mirroring from the same
-tokens. Bank state is a few more "latest" heads. Each board describes, per 8 KB or 16 KB
-region of `$8000-$FFFF`, which literal selects which bank; a layer-1 FFN turns that into one
-"bank b is mapped here" literal per region and bank, and the ROM queries are sums of gated
-functions, one per (region, bank).
+On a mapper board, a store to `$8000-$FFFF` becomes a `MAP` token whose payload says what the
+write did. For MMC1 that includes the serial shift register (five writes per register), so the
+model computes the shift state and the host reads CHR banks and mirroring from the same tokens.
+Bank state is a few more "latest" heads. Each board describes, per 8 KB or 16 KB region of
+`$8000-$FFFF`, which literal selects which bank. A layer-1 FFN turns that into one "bank b is
+mapped here" literal per region and bank, and the ROM queries are sums of gated functions, one
+per (region, bank).
 
-MMC3's bank-data writes go to whichever register the last bank-select write named, so the
-model puts the target register into the `MAP` payload; R6 and R7 are then "the latest `MAP`
-that wrote register 6 / 7". Its scanline IRQ is counted by the host, which injects an `IRQ`
-token (like `NMI`, but only while the I flag, which the host follows through `P` and `JI`
-tokens, is clear). Inside the model an IRQ record is an NMI record with the other vector.
+MMC3's bank-data writes go to whichever register the last bank-select write named, so the model
+puts the target register into the `MAP` payload; R6 and R7 are then "the latest `MAP` that wrote
+register 6 / 7". The host counts MMC3's scanline IRQ and injects an `IRQ` token. This works like
+`NMI`, but only while the I flag is clear; the host follows the I flag through `P` and `JI`
+tokens. Inside the model, an IRQ record is an NMI record with the other vector.
 
 Zelda and Kid Icarus run code from RAM. The opcode fetch happens in layer 3, before RAM write
-keys exist (layer 6), so the model cannot attend to RAM code directly. Instead, a record whose
-PC is in RAM starts with `OPF(opcode) OB1(byte) OB2(byte)`: the model reads its own code into
-the trace through the ordinary data read, and small latch heads return those bytes (zeros in
-any other record) to the same decode inputs the ROM fetch uses. ROM traces are unchanged.
+keys exist (layer 6), so the model cannot attend to code in RAM directly. Instead, a record
+whose PC is in RAM starts with `OPF(opcode) OB1(byte) OB2(byte)`. The model reads its own code
+into the trace through the ordinary data read, and small latch heads return those bytes (zeros
+in any other record) to the same decode inputs the ROM fetch uses. Traces of code running from
+ROM are unchanged.
 
 ### 8. Context rollover
 
-Positions must stay below 2^20 so every score fits in a float64 exactly. Near the limit, the
+Positions must stay below 2^20 so every score fits exactly in a float64. Near that limit, the
 driver reads the machine state out of the model (registers from their heads, RAM by querying
 the RAM head's cache at every address) and starts a fresh context with that state as the
-prompt. The PRG-ROM part of the prompt is cached and restored instead of re-fed. The trace
-after a rollover matches the trace without one (tested with rollovers forced every 100k
-tokens).
+prompt. The PRG-ROM part of the prompt is cached and restored instead of fed again. The trace
+after a rollover matches the trace without one (tested with rollovers forced every 100k tokens).
 
 ## Limitations
 
 - Official opcodes only; an unofficial opcode emits `HALT`.
 - No APU frame or DMC IRQs.
-- nesformer's idle-loop skip is off while an MMC3 IRQ is enabled (it would jump over the
-  scanline the IRQ fires on), so IRQ-heavy games run slower.
-- MMC1 boards above 256 KB (SUROM: Dragon Warrior III and IV) are not supported.
-- The PPU is in the host and renders per scanline, as in nesformer.
 - No sound.
-
-## Usage
-
-```bash
-uv sync
-uv run python -m hullnes run roms/thwaite.nes --frames 600 \
-  --buttons "start@90-95+200-205,a@230-233+250-253"
-uv run python -m hullnes run ~/roms/smb.nes --frames 600 \
-  --buttons "start@60-65,right@200-600,a@250-265+300-315"
-uv run python -m hullnes check GAME.nes --tokens 300000   # free-run vs the reference CPU
-uv run python -m hullnes trace GAME.nes --tokens 40
-uv run python -m hullnes info GAME.nes                    # model size for that board
-uv run python -m hullnes why GAME.nes 0086 075A           # who last wrote these RAM bytes
-uv run python -m hullnes hunt GAME.nes --fork-frame 300 --branches 8   # glitch hunting
-uv run python -m hullnes dense GAME.nes --tokens 3000     # run as a plain softmax transformer
-uv run pytest -q
-```
-
-`--buttons` follows nesformer's syntax: `button@first-last` frame ranges, `+` to combine.
+- The PPU is in the host and renders per scanline, as in nesformer.
+- MMC1 boards above 256 KB (SUROM: Dragon Warrior III and IV) are not supported.
+- Commercial ROMs are not included, so most of the commercial-game checks above need your own
+  ROM files (`NES_ROMS`).
 
 ## Files
 
@@ -213,18 +281,30 @@ uv run pytest -q
 | `hullnes/tokens.py` | vocabulary and prompt layout |
 | `hullnes/mapper.py` | NROM, UxROM, CNROM, MMC1, MMC3 |
 | `hullnes/dense.py` | the weights as dense matrices, run with ordinary softmax attention |
-| `hullnes/hunt.py` | fork at a frame (a savestate is a prompt), random inputs, flag odd traces |
+| `hullnes/hunt.py` | fork at a frame (a savestate is a prompt), random inputs, flag unusual traces |
 | `hullnes/host.py` | nesformer's host plus mapper boards |
 | `hullnes/run.py` | reference runs, teacher-forced check, free-running, rollover |
+| `scripts/bench.py` | the speed benchmark |
+| `docs/IDEAS.md` | things this design makes cheap: provenance, glitch hunting, savestates as prompts |
 | `third_party/chipformer/dsl` | Qwenputer's circuit DSL (MIT), plus a `Cumsum` node |
 | `third_party/nesformer` | nesformer's trace spec, reference CPU and host (MIT), extended for mappers and code in RAM |
 
 ## Credits
 
-- [nesformer](https://github.com/dbreunig/nesformer) by Drew Breunig: trace format, reference
-  CPU, host, test ROMs (MIT).
-- [Qwenputer](https://github.com/divagr18/qwenputer) by Divyansh Agrawal: the `chipformer` DSL,
-  whose original target is this kind of 2D-head transformer (MIT).
-- Percepta, [Can LLMs Be Computers?](https://www.percepta.ai/blog/can-llms-be-computers): 2D
-  heads, the hull cache, cumulative sums by uniform attention, the program as a prompt.
-- Test ROMs: see `roms/SOURCES.md`.
+- [nesformer](https://github.com/dbreunig/nesformer) by [Drew Breunig](https://www.dbreunig.com/)
+  (MIT): the trace format, reference 6502 CPU, host (PPU, controllers, NMI timing), test ROMs
+  and nestest checks. Vendored with modifications in `third_party/nesformer`.
+- [Qwenputer](https://github.com/divagr18/qwenputer) by Divyansh Agrawal (MIT): the `chipformer`
+  circuit DSL, whose original target is this kind of 2D-head transformer. Vendored in
+  `third_party/chipformer` with an added `Cumsum` node. nesformer also builds on Qwenputer.
+- Percepta, [Can LLMs Be Computers?](https://www.percepta.ai/blog/can-llms-be-computers), by
+  Christos Tzamos and others at Percepta: 2D heads, the convex-hull (HullKVCache) decoding idea,
+  cumulative sums by uniform attention, and the program as a prompt.
+
+### Test ROMs
+
+See [roms/SOURCES.md](roms/SOURCES.md):
+
+- nestest by Kevin Horton
+- Full Game by Doug Fraker (MIT)
+- Thwaite by Damian Yerrick (GPL-3.0)
