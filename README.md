@@ -21,12 +21,13 @@ a Li Chao tree cache, the same building blocks as Percepta's construction. hulln
 earlier target (vendored in `third_party/chipformer`) and writes the 6502 for it from scratch in
 `hullnes/circuit.py`.
 
-| Thwaite | Full Game |
-|---|---|
-| ![Thwaite running on hullnes](docs/media/thwaite.gif) | ![Full Game running on hullnes](docs/media/full_game.gif) |
+| Super Mario Bros. (World 1-1) | Thwaite | Full Game |
+|---|---|---|
+| ![Super Mario Bros. running on hullnes](docs/media/smb.gif) | ![Thwaite running on hullnes](docs/media/thwaite.gif) | ![Full Game running on hullnes](docs/media/full_game.gif) |
 
-Both GIFs are homebrew games included in `roms/` (see [Test ROMs](#test-roms)). Commercial ROMs
-are not included; to run a commercial game, supply your own `.nes` file.
+Every frame comes from tokens the transformer predicted (the host draws them). Thwaite and Full
+Game are homebrew games included in `roms/` (see [Test ROMs](#test-roms)). Commercial ROMs are
+not included; to run Super Mario Bros. or another commercial game, supply your own `.nes` file.
 
 ## What runs in the weights
 
