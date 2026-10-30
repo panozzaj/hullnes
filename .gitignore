@@ -1,0 +1,9 @@
+.DS_Store
+.env
+.jj/
+.playwright-mcp/
+__pycache__/
+node_modules/
+tmp/
+.venv/
+tmp/*.gif
