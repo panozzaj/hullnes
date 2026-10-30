@@ -187,6 +187,9 @@ def main(argv=None):
     h.add_argument("--every", type=int, default=2)
     h.add_argument("--scale", type=int, default=2)
     h.set_defaults(fn=cmd_hunt)
+    from hullnes.session import add_parser as add_session
+
+    add_session(sub)
     i = sub.add_parser("info")
     i.add_argument("rom", nargs="?")
     i.set_defaults(fn=cmd_info)

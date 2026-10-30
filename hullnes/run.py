@@ -210,6 +210,7 @@ def run_model(rom: Rom, frames: int = 60, buttons=None, max_tokens: int | None =
         return toks, result
     halt, nmi, irq = S.tok("HALT"), S.tok("NMI"), S.tok("IRQ")
     seen = rollovers = 0
+    stop = False
     while host.frame < frames and not host.halted:
         if max_tokens is not None and len(toks) >= max_tokens:
             break
@@ -227,9 +228,9 @@ def run_model(rom: Rom, frames: int = 60, buttons=None, max_tokens: int | None =
                 raise AssertionError(f"token {len(toks) - 1}: model {T.name(tt)}, reference "
                                      f"{T.name(want) if want is not None else 'end'}")
             pred = eng.step(tt)
-            if on_token:
-                on_token(tt, host, eng.pos - 1)
-        if t == halt:
+            if on_token and on_token(tt, host, eng.pos - 1):
+                stop = True  # the callback asked to stop (after this token)
+        if t == halt or stop:
             break
         if eng.pos > eng.max_positions - ROLL_MARGIN and S.is_final(toks[-1]):
             pred = ses.rollover()
