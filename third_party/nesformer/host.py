@@ -116,7 +116,8 @@ class Host:
             self.rec_dma = False
             self.rec_cycles = self.cycles
             self.in_nmi = fam == "NMI"
-            self.rec_op = None if fam in ("NMI", "R") else self.cart.prg[self.pc & 0x7FFF]
+            self.rec_op = None if fam in ("NMI", "R", "RL") else p & 255 if fam == "OPF" \
+                else self.cart.prg[self.pc & 0x7FFF]  # hullnes: OPF is the opcode of RAM code
         if fam == "IOW":
             self.io_write(p >> 8 & 63, p & 255)
             self.rec_dma |= (p >> 8 & 63) == 0x14
@@ -129,8 +130,8 @@ class Host:
 
     def finish(self, t, fam, p):
         self.rec_start = True
-        if fam == "R":
-            self.pc = 0x8000 + p
+        if fam in ("R", "RL"):
+            self.pc = S.anchor_addr(fam, p)
             return
         if fam == "HALT":
             return
@@ -144,17 +145,17 @@ class Host:
                 cyc += p >> 6 & 1
             if self.rec_dma:
                 cyc += 513
-            if mode == "rel" and fam == "J":
-                cyc += 1 + int(((self.pc + 2) & 0xFF00) != ((0x8000 + p) & 0xFF00))
-        if fam in ("J", "JI"):
-            self.pc = 0x8000 + p
+            if mode == "rel" and fam in ("J", "JL"):
+                cyc += 1 + int(((self.pc + 2) & 0xFF00) != (S.anchor_addr(fam, p) & 0xFF00))
+        if fam in ("J", "JI", "JL"):
+            self.pc = S.anchor_addr(fam, p)
         else:
             self.pc = (self.pc + S.length_of(t)) & 0xFFFF
         self.cycles += cyc
         self.catch_up(self.cycles * 3)
-        if fam == "J" and not self.in_nmi:
-            self.maybe_skip(p)
-        elif fam in ("JI", "R"):
+        if fam in ("J", "JL") and not self.in_nmi:
+            self.maybe_skip(S.anchor_addr(fam, p))
+        elif fam in ("JI", "R", "RL"):
             self.prev_body = None
             self.iter_toks = []
             self.iter_cycle0 = self.cycles

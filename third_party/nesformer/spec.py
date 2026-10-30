@@ -28,6 +28,15 @@ Token families (payload bit layout, LSB first):
                                           write to $4014 has LEN 0 and starts OAM DMA:
   DM              byte(8) index(8)        byte `index` of the page; after the 256th, NT(LEN)
                                           ends the record
+  MAP     final   payload(11) LEN(2)      (hullnes) a store to a mapper board's registers at
+                                          $8000-$FFFF; hullnes/mapper.py defines the payload
+  (hullnes) code in RAM ($0000-$1FFF, PRG-RAM $6000-$7FFF). A record whose PC is below $8000
+  starts by reading its instruction bytes into the trace:
+  OPF             opcode(8) LAST              the opcode (LAST: no operand bytes follow)
+  OB1             byte(8) LAST                operand byte 1 (LAST: no byte 2)
+  OB2             byte(8)                     operand byte 2
+  JL      final   target(15)              like J, to an address below $8000
+  RL      final   anchor(15)              like R, for a PC below $8000
   NMI     control injected by the host before a record: the interrupt sequence follows
   HALT    control the machine stopped (an unsupported opcode or a jump outside the ROM)
   GO      control the first token of a run (after the state snapshot)
@@ -39,7 +48,8 @@ FAMILY_SIZES = [
     ("A", 1 << 13), ("X", 1 << 13), ("Y", 1 << 13), ("ST", 1 << 11), ("RM", 1 << 12),
     ("P", 1 << 9), ("S", 1 << 10), ("NT", 4), ("J", 1 << 15), ("JI", 1 << 15), ("R", 1 << 15),
     ("LO", 256), ("HI", 256), ("PSH", 1 << 10), ("PUL", 256), ("IOR", 64), ("IN", 256),
-    ("IOW", 1 << 16), ("DM", 1 << 16),
+    ("IOW", 1 << 16), ("DM", 1 << 16), ("MAP", 1 << 13),
+    ("OPF", 512), ("OB1", 512), ("OB2", 256), ("JL", 1 << 15), ("RL", 1 << 15),
 ]
 FAMILIES = {}
 _base = 0
@@ -113,17 +123,32 @@ def length_of(t: int) -> int:
         return p
     if fam == "IOW":
         return p >> 14
+    if fam == "MAP":
+        return p >> 11
     return 0
 
 
 def is_final(t: int) -> bool:
     """The token ends a record (the next token starts the next record)."""
     fam = family(t)[0]
-    return fam in ("J", "JI", "R", "HALT", "GO") or length_of(t) > 0
+    return fam in ("J", "JI", "R", "JL", "RL", "HALT", "GO") or length_of(t) > 0
 
 
 def is_anchor(t: int) -> bool:
-    return family(t)[0] in ("J", "JI", "R")
+    return family(t)[0] in ("J", "JI", "R", "JL", "RL")
+
+
+def anchor_addr(fam: str, p: int) -> int:
+    """The address an anchor token (J JI R JL RL) points at."""
+    return p if fam in ("JL", "RL") else 0x8000 + p
+
+
+def jump_tok(target: int, interrupt: bool = False) -> int:
+    """J / JI to $8000-$FFFF, JL below."""
+    if target >= 0x8000:
+        return tok("JI" if interrupt else "J", target - 0x8000)
+    assert not interrupt
+    return tok("JL", target)
 
 
 def name(t: int) -> str:
@@ -136,6 +161,12 @@ def name(t: int) -> str:
         return f"P({p & 63:06b} px{p >> 6 & 1} L{p >> 7})"
     if fam in ("J", "JI", "R"):
         return f"{fam}(${0x8000 + p:04X})"
+    if fam in ("JL", "RL"):
+        return f"{fam}(${p:04X})"
+    if fam in ("OPF", "OB1"):
+        return f"{fam}(${p & 255:02X}{' last' if p >> 8 else ''})"
+    if fam == "OB2":
+        return f"OB2(${p:02X})"
     if fam == "IOW":
         r = p >> 8 & 63
         reg = f"${0x2000 + r - 32:04X}" if 32 <= r < 40 else f"${0x4000 + r:04X}" if r < 32 \
@@ -153,6 +184,8 @@ def name(t: int) -> str:
         return f"{fam}(${p:02X})"
     if fam == "NT":
         return f"NT(L{p})"
+    if fam == "MAP":
+        return f"MAP(${p & 0x7FF:03X} L{p >> 11})"
     if fam == "IOR":
         reg = f"${0x2000 + p - 32:04X}" if 32 <= p < 40 else f"${0x4000 + p:04X}" if p < 32 \
             else "$4020+"

@@ -77,7 +77,7 @@ class Halt(Exception):
 
 @dataclass
 class Cpu:
-    prg: bytes  # 32 KB, mapped at $8000
+    prg: bytes  # 32 KB, mapped at $8000 (hullnes: all of PRG-ROM when a board is given)
     A: int = 0
     X: int = 0
     Y: int = 0
@@ -88,15 +88,20 @@ class Cpu:
     ram: bytearray = field(default_factory=lambda: bytearray(2048))
     halted: bool = False
     steps: int = 0
+    # hullnes: a mapper board (hullnes/mapper.py) and its 8 KB PRG-RAM at $6000-$7FFF
+    board: object = None
+    prgram: bytearray = None
 
     @classmethod
-    def boot(cls, prg: bytes, pc: int | None = None) -> "Cpu":
-        assert len(prg) == 0x8000
-        c = cls(prg)
+    def boot(cls, prg: bytes, pc: int | None = None, board=None) -> "Cpu":
+        assert len(prg) == 0x8000 or board is not None
+        c = cls(prg, board=board)
+        if board is not None and board.prgram:
+            c.prgram = bytearray(0x2000)
         if pc is None:
-            pc = prg[0x7FFC] | prg[0x7FFD] << 8
+            pc = c.rom(0xFFFC) | c.rom(0xFFFD) << 8
         assert pc >= 0x8000, f"reset vector {pc:04X} outside the ROM"
-        c.anchor = pc - 0x8000
+        c.anchor = pc  # hullnes: the anchor is a full address (nesformer: pc - $8000)
         return c
 
     # --- state helpers -----------------------------------------------------------------------
@@ -106,7 +111,7 @@ class Cpu:
 
     @property
     def pc(self) -> int:
-        return 0x8000 | ((self.anchor + self.offset) & 0x7FFF)
+        return (self.anchor + self.offset) & 0xFFFF
 
     def p_byte(self, b: int) -> int:
         f = self.flags
@@ -117,11 +122,29 @@ class Cpu:
         self.n[ln - 1] += 1
 
     def jump(self, target: int) -> int:
-        self.anchor, self.n = target - 0x8000, [0, 0, 0]
-        return target - 0x8000
+        self.anchor, self.n = target, [0, 0, 0]
+        return target
+
+    def exec_ok(self, a: int) -> bool:
+        """hullnes: code may run from ROM, work RAM, or PRG-RAM (not from I/O space)."""
+        return a >= 0x8000 or a < 0x2000 or (self.prgram is not None and a >= 0x6000)
+
+    def peek(self, a: int) -> int:
+        """A byte of code (no I/O)."""
+        a &= 0xFFFF
+        if a < 0x2000:
+            return self.ram[a & 0x7FF]
+        if a >= 0x8000:
+            return self.rom(a)
+        return self.prgram[a - 0x6000]
 
     def rom(self, a: int) -> int:
+        if self.board is not None:
+            return self.prg[self.board.prg_index(a)]
         return self.prg[a & 0x7FFF]
+
+    def is_io(self, a: int) -> bool:
+        return 0x2000 <= a < (0x6000 if self.prgram is not None else 0x8000)
 
     # --- the data port (one byte per position) -------------------------------------------------
     def read(self, ea: int):
@@ -129,7 +152,9 @@ class Cpu:
         if ea < 0x2000:
             return self.ram[ea & 0x7FF]
         if ea >= 0x8000:
-            return self.prg[ea & 0x7FFF]
+            return self.rom(ea)
+        if self.prgram is not None and ea >= 0x6000:
+            return self.prgram[ea - 0x6000]
         v = yield S.tok("IOR", S.reg_index(ea))
         assert v is not None and 0 <= v < 256, "the driver must send the IN byte"
         return v
@@ -139,12 +164,23 @@ class Cpu:
         if self.halted:
             return
         if self.offset >= S.OFF_MAX:
-            w = (self.anchor + self.offset) & 0x7FFF
-            self.jump(0x8000 + w)
-            yield S.tok("R", w)
+            w = self.pc
+            self.jump(w)
+            yield S.tok("R", w - 0x8000) if w >= 0x8000 else S.tok("RL", w)
             return
         pc = self.pc
-        op, b1, b2 = self.rom(pc), self.rom(pc + 1), self.rom(pc + 2)
+        if pc >= 0x8000:
+            op, b1, b2 = self.rom(pc), self.rom(pc + 1), self.rom(pc + 2)
+        else:  # hullnes: code in RAM: the instruction's bytes go into the trace first
+            op = self.peek(pc)
+            n = LENGTH[OPS[op][1]] if op in OPS else 1
+            yield S.tok("OPF", op | int(n == 1) << 8)
+            b1 = self.peek(pc + 1)
+            b2 = self.peek(pc + 2)
+            if n >= 2:
+                yield S.tok("OB1", b1 | int(n == 2) << 8)
+            if n == 3:
+                yield S.tok("OB2", b2)
         if op not in OPS:
             self.halted = True
             yield S.tok("HALT")
@@ -236,18 +272,25 @@ class Cpu:
                 yield S.tok("IOW", v | 0x14 << 8)
                 for i in range(256):
                     a = v << 8 | i
-                    byte = self.ram[a & 0x7FF] if a < 0x2000 else self.prg[a & 0x7FFF] \
-                        if a >= 0x8000 else 0
+                    byte = self.ram[a & 0x7FF] if a < 0x2000 else self.rom(a) \
+                        if a >= 0x8000 else 0 if self.is_io(a) else self.prgram[a - 0x6000]
                     yield S.tok("DM", byte | i << 8)
                 self.commit(ln)
                 yield S.tok("NT", ln)
                 return
-            if 0x2000 <= ea < 0x8000:
+            if ea >= 0x8000 and self.board is not None and self.board.number != 0:
+                p = self.board.write(ea, v)
+                self.commit(ln)
+                yield S.tok("MAP", p | ln << 11)
+                return
+            if self.is_io(ea):
                 self.commit(ln)
                 yield S.tok("IOW", v | S.reg_index(ea) << 8 | ln << 14)
                 return
             if ea < 0x2000:
                 self.ram[ea & 0x7FF] = v
+            elif 0x6000 <= ea < 0x8000:
+                self.prgram[ea - 0x6000] = v
             self.commit(ln)
             yield S.tok("ST", v | (ea >> 7 & 1) << 8 | ln << 9)
             return
@@ -273,6 +316,16 @@ class Cpu:
                 return
             if ea < 0x2000:
                 self.ram[ea & 0x7FF] = r
+            elif self.prgram is not None and 0x6000 <= ea < 0x8000:
+                self.prgram[ea - 0x6000] = r
+            elif ea >= 0x8000 and self.board is not None and self.board.number != 0:
+                # hullnes: RM (flags, not final), then the board write as a final MAP token
+                f["N"], f["Z"], f["C"] = r >> 7, int(r == 0), c
+                yield S.tok("RM", r | c << 8 | (ea >> 7 & 1) << 9)
+                p = self.board.write(ea, m if self.board.number == 1 else r)
+                self.commit(ln)
+                yield S.tok("MAP", p | ln << 11)
+                return
             f["N"], f["Z"], f["C"] = r >> 7, int(r == 0), c
             self.commit(ln)
             yield S.tok("RM", r | c << 8 | (ea >> 7 & 1) << 9 | ln << 10)
@@ -283,11 +336,11 @@ class Cpu:
             fl, want = BRANCH_FLAG[mn]
             if f[fl] == want:
                 target = (pc + 2 + (b1 - 256 if b1 & 0x80 else b1)) & 0xFFFF
-                if target < 0x8000:
+                if not self.exec_ok(target):
                     self.halted = True
                     yield S.tok("HALT")
                     return
-                yield S.tok("J", self.jump(target))
+                yield S.jump_tok(self.jump(target))
             else:
                 self.commit(ln)
                 yield S.tok("NT", ln)
@@ -297,7 +350,7 @@ class Cpu:
                 target = b1 | b2 << 8
             else:
                 ptr = b1 | b2 << 8
-                if 0x2000 <= ptr < 0x8000:  # (an I/O pointer is not supported)
+                if self.is_io(ptr):  # (an I/O pointer is not supported)
                     self.halted = True
                     yield S.tok("HALT")
                     return
@@ -305,22 +358,22 @@ class Cpu:
                 yield S.tok("LO", lo)
                 hi = yield from self.read((ptr & 0xFF00) | ((ptr + 1) & 0xFF))
                 target = lo | hi << 8
-            if target < 0x8000:
+            if not self.exec_ok(target):
                 self.halted = True
                 yield S.tok("HALT")
                 return
-            yield S.tok("J", self.jump(target))
+            yield S.jump_tok(self.jump(target))
             return
         if mn == "JSR":
             target = b1 | b2 << 8
-            if target < 0x8000:
+            if not self.exec_ok(target):
                 self.halted = True
                 yield S.tok("HALT")
                 return
             ret = (pc + 2) & 0xFFFF
             yield self.push(ret >> 8, 0)
             yield self.push(ret & 0xFF, 0)
-            yield S.tok("J", self.jump(target))
+            yield S.jump_tok(self.jump(target))
             return
         if mn in ("RTS", "RTI"):
             if mn == "RTI":
@@ -334,11 +387,11 @@ class Cpu:
             hi = self.ram[0x100 | self.SP]
             target = (lo | hi << 8) + (1 if mn == "RTS" else 0)
             target &= 0xFFFF
-            if target < 0x8000:
+            if not self.exec_ok(target):
                 self.halted = True
                 yield S.tok("HALT")
                 return
-            yield S.tok("J", self.jump(target))
+            yield S.jump_tok(self.jump(target))
             return
         if mn == "BRK":
             ret = (pc + 2) & 0xFFFF
@@ -408,7 +461,7 @@ class Cpu:
             yield S.tok("HALT")
             return
         self.flags["I"] = 1
-        yield S.tok("JI", self.jump(target))
+        yield S.jump_tok(self.jump(target), interrupt=True)
 
     def nmi_record(self):
         """The record after an injected NMI token."""
