@@ -178,7 +178,7 @@ def check_trace(rom: Rom, trace: list[int], pc: int | None = None, check: bool =
 def run_model(rom: Rom, frames: int = 60, buttons=None, max_tokens: int | None = None,
               pc: int | None = None, expect: list[int] | None = None, skip: bool = True,
               keep_frames: bool = True, on_frame=None, engine: Engine | None = None,
-              on_token=None, session: "Session | None" = None, start=None):
+              on_token=None, session: "Session | None" = None, start=None, fast: bool = True):
     """Free-run the transformer: it predicts every token except the host's NMI / IN injections.
     With ``expect`` (a reference trace), stop at the first difference. ``start`` = (machine
     state, host) resumes from a savestate (see hunt.py): the state becomes the prompt and the
@@ -196,6 +196,18 @@ def run_model(rom: Rom, frames: int = 60, buttons=None, max_tokens: int | None =
         go = ses.boot_prompt(pc)
     toks = [go]
     pred = eng.step(go)
+    if fast and on_token is None:  # the compiled loop (fastrun.py): same tokens, same frames
+        from hullnes.fastrun import run_fast
+
+        toks, result = run_fast(ses, host, pred, toks, frames, max_tokens, buttons, keep_frames,
+                                on_frame, ROLL_MARGIN)
+        if expect is not None:
+            n = min(len(toks), len(expect))
+            bad = next((i for i in range(n) if toks[i] != expect[i]), None)
+            if bad is not None:
+                raise AssertionError(f"token {bad}: model {T.name(toks[bad])}, reference "
+                                     f"{T.name(expect[bad])}")
+        return toks, result
     halt, nmi, irq = S.tok("HALT"), S.tok("NMI"), S.tok("IRQ")
     seen = rollovers = 0
     while host.frame < frames and not host.halted:

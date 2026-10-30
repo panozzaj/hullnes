@@ -124,3 +124,16 @@ def test_numba_ppu_matches_python_ppu(name):
     finally:
         BoardHost.fast_ppu = True
     assert frames[True] == frames[False]
+
+
+@pytest.mark.parametrize("name", ["thwaite.nes", "full_game.nes"])
+def test_compiled_loop_matches_python_loop(name):
+    """The compiled driver + host (fastrun.py) gives the same tokens and frames as the Python
+    one, including across a forced rollover."""
+    btn = parse_buttons(BUTTONS)
+    runs = {}
+    for fast in (False, True):
+        toks, host = run_model(cart(name), frames=150, buttons=btn, fast=fast,
+                               engine=new_engine(cart(name), max_positions=150_000))
+        runs[fast] = (toks, [bytes(r) for f in host.frames for r in f], host.rollovers)
+    assert runs[True] == runs[False] and runs[True][2] >= 1
