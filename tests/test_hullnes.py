@@ -81,7 +81,7 @@ def test_free_run_with_rollover(name):
 LIBRARY = Path(os.environ.get("NES_ROMS", "/nonexistent")).expanduser()
 GAMES = ["Super Mario Bros. (World).nes", "Mega Man (USA).nes", "Metroid (USA).nes",
          "Mega Man 2 (USA).nes", "Legend of Zelda, The (USA) (Rev A).nes", "Mega Man 3 (USA).nes",
-         "Kirby's Adventure (USA) (Rev A).nes"]
+         "Kirby's Adventure (USA) (Rev A).nes", "Super Mario Bros. 3 (USA) (Rev A).nes"]
 
 
 def find_game(name):

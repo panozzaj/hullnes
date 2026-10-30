@@ -122,6 +122,18 @@ def cmd_dense(a):
     verify(load_cart(a.rom), a.tokens, a.pc, parse_buttons(a.buttons or ""))
 
 
+def cmd_hunt(a):
+    from hullnes.hunt import hunt, score
+
+    rom = load_cart(a.rom)
+    base, results = hunt(rom, a.fork_frame, a.frames, a.branches,
+                         buttons=parse_buttons(a.buttons or ""), seed=a.seed)
+    best = max(results, key=lambda r: score(r[1], base))
+    out = a.gif or f"hunt_seed{best[0]}.gif"
+    save_gif(best[2].frames, out, a.every, a.scale)
+    print(f"most unusual branch: seed {best[0]}; wrote {out}")
+
+
 def cmd_info(a):
     cp = compiled(Config.for_board(load_cart(a.rom).board) if a.rom else Config())
     print(cp.stats())
@@ -164,6 +176,17 @@ def main(argv=None):
     dn.add_argument("--buttons", default="")
     dn.add_argument("--pc", type=lambda s: int(s, 16))
     dn.set_defaults(fn=cmd_dense)
+    h = sub.add_parser("hunt", help="fork at a frame, try random inputs, flag odd traces")
+    h.add_argument("rom")
+    h.add_argument("--fork-frame", type=int, default=300)
+    h.add_argument("--frames", type=int, default=120, help="frames per branch")
+    h.add_argument("--branches", type=int, default=8)
+    h.add_argument("--buttons", default="", help="inputs up to the fork")
+    h.add_argument("--seed", type=int, default=0)
+    h.add_argument("--gif")
+    h.add_argument("--every", type=int, default=2)
+    h.add_argument("--scale", type=int, default=2)
+    h.set_defaults(fn=cmd_hunt)
     i = sub.add_parser("info")
     i.add_argument("rom", nargs="?")
     i.set_defaults(fn=cmd_info)

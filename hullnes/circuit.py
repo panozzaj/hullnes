@@ -117,7 +117,7 @@ def vlen(fam: str, p: int) -> int:
 
 
 def vfinal(fam: str, p: int) -> int:
-    return int(fam in ("J", "JI", "R", "JL", "RL", "HALT", "GO") or vlen(fam, p) > 0)
+    return int(fam in ("J", "JI", "R", "JL", "RL", "JIL", "HALT", "GO") or vlen(fam, p) > 0)
 
 
 def base(fam: str) -> int:
@@ -341,13 +341,13 @@ def build(cfg: Config = Config()) -> NesCircuit:
 
     f_fin = tf("final", vfinal)
     f_len = tf("len", vlen)
-    is_anc = tf("is_anchor", isf("J", "JI", "R", "JL", "RL"))
-    f_anc = tf("anchor", lambda fm, p: S.anchor_addr(fm, p) if fm in ("J", "JI", "R", "JL", "RL")
+    is_anc = tf("is_anchor", isf("J", "JI", "R", "JL", "RL", "JIL"))
+    f_anc = tf("anchor", lambda fm, p: S.anchor_addr(fm, p) if fm in ("J", "JI", "R", "JL", "RL", "JIL")
                else 0)
     f_anc_lo = tf("anchor.lo", lambda fm, p: S.anchor_addr(fm, p) & 255
-                  if fm in ("J", "JI", "R", "JL", "RL") else 0)
+                  if fm in ("J", "JI", "R", "JL", "RL", "JIL") else 0)
     f_anc_hi = tf("anchor.hi", lambda fm, p: S.anchor_addr(fm, p) >> 8
-                  if fm in ("J", "JI", "R", "JL", "RL") else 0)
+                  if fm in ("J", "JI", "R", "JL", "RL", "JIL") else 0)
     is_ = {fm: tf(f"is_{fm}", isf(fm)) for fm in
            ["A", "X", "Y", "LO", "HI", "IN", "IOR", "IOW", "DM", "PSH", "PUL", "P", "ST", "RM",
             "NMI", "IRQ", "GO", "RB", "RI", "MAP", "OPF", "OB1", "OB2"]}
@@ -380,8 +380,8 @@ def build(cfg: Config = Config()) -> NesCircuit:
     v_src = tf("v_src", isf("A", "X", "Y", "P"))
     fV = tf("fV", lambda fm, p: (p >> 4 & 1) if fm == "P" else (p >> 9 & 1)
             if fm in ("A", "X", "Y") else 0)
-    i_src = tf("i_src", isf("P", "JI"))
-    fI = tf("fI", lambda fm, p: (p >> 2 & 1) if fm == "P" else int(fm == "JI"))
+    i_src = tf("i_src", isf("P", "JI", "JIL"))
+    fI = tf("fI", lambda fm, p: (p >> 2 & 1) if fm == "P" else int(fm in ("JI", "JIL")))
     fD = tf("fD", lambda fm, p: (p >> 3 & 1) if fm == "P" else 0)
     sp_src = tf("sp_src", isf("S", "PSH", "PUL"))
     fSP = tf("fSP", byte_of("S", "PSH", "PUL"))
@@ -829,8 +829,9 @@ def build(cfg: Config = Config()) -> NesCircuit:
         case([intr, is_["PSH"], JJ1, *extra_l], tokexpr("PSH", spm))
         case([intr, is_["PSH"], JJ2, *extra_l], tokexpr("PSH", spm))
         case([intr, is_["PSH"], JJ3, *extra_l], tokexpr("LO", M))
-        case([intr, is_["LO"], *extra_l, M7], tokexpr("JI", LO + 256 * M - 0x8000))
-        case([intr, is_["LO"], *extra_l, 1 - M7], S.tok("HALT"))
+        case([intr, is_["LO"], *extra_l, M7], tokexpr("JI", ind_t - 0x8000))
+        case([intr, is_["LO"], *extra_l, ind_ram], tokexpr("JIL", ind_t))
+        case([intr, is_["LO"], *extra_l, 1 - M7 - ind_ram], S.tok("HALT"))
     # stack, flags, transfers, inc/dec, NOP
     case([mns("PHA", "PHP"), *S0], tokexpr("PSH", spm + 256))
     case([MN["PLA"], is_["PUL"], nNM], reg_tok("A", M, C, V, 0, 1))

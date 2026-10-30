@@ -456,7 +456,7 @@ class Cpu:
         lo = self.rom(vector)
         yield S.tok("LO", lo)
         target = lo | self.rom(vector + 1) << 8
-        if target < 0x8000:
+        if not self.exec_ok(target):
             self.halted = True
             yield S.tok("HALT")
             return

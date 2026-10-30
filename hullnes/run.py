@@ -178,15 +178,22 @@ def check_trace(rom: Rom, trace: list[int], pc: int | None = None, check: bool =
 def run_model(rom: Rom, frames: int = 60, buttons=None, max_tokens: int | None = None,
               pc: int | None = None, expect: list[int] | None = None, skip: bool = True,
               keep_frames: bool = True, on_frame=None, engine: Engine | None = None,
-              on_token=None):
+              on_token=None, session: "Session | None" = None, start=None):
     """Free-run the transformer: it predicts every token except the host's NMI / IN injections.
-    With ``expect`` (a reference trace), stop at the first difference. Returns (trace, host)."""
-    ses = Session(rom, engine)
+    With ``expect`` (a reference trace), stop at the first difference. ``start`` = (machine
+    state, host) resumes from a savestate (see hunt.py): the state becomes the prompt and the
+    host continues as it was. Returns (trace, host)."""
+    ses = session or Session(rom, engine)
     eng = ses.eng
     run_model.session = ses  # for tools that query the context after the run
-    host = BoardHost.for_rom(rom, buttons=buttons, keep_frames=keep_frames, skip=skip)
-    host.pc = boot(rom, pc).pc
-    go = ses.boot_prompt(pc)
+    if start is not None:
+        state, host = start
+        host.buttons = buttons
+        go = ses.prompt(state)
+    else:
+        host = BoardHost.for_rom(rom, buttons=buttons, keep_frames=keep_frames, skip=skip)
+        host.pc = boot(rom, pc).pc
+        go = ses.boot_prompt(pc)
     toks = [go]
     pred = eng.step(go)
     halt, nmi, irq = S.tok("HALT"), S.tok("NMI"), S.tok("IRQ")

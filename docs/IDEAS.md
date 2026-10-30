@@ -38,6 +38,11 @@ cheap because the PRG-ROM part of the prompt is already cached (`Session.prompt`
 differ only in the RAM and register part, so a savestate is about 2,100 tokens (10,300 with
 8 KB of cartridge RAM).
 
+A first version exists: `python -m hullnes hunt GAME.nes --fork-frame 300 --branches 8`
+(`hullnes/hunt.py`). It uses random inputs and saves a GIF of the most unusual branch. On
+Super Mario Bros. 1-1 with 90 frames per branch it finds nothing, as it should; the "new jump
+targets" signal mostly measures how much new gameplay a branch reached.
+
 An LLM fits in two places: proposing input sequences from a description of the game ("try
 clipping into the wall by ducking and jumping on the frame the screen scrolls"), and explaining
 a flagged trace in words.

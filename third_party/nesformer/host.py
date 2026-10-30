@@ -147,7 +147,7 @@ class Host:
                 cyc += 513
             if mode == "rel" and fam in ("J", "JL"):
                 cyc += 1 + int(((self.pc + 2) & 0xFF00) != (S.anchor_addr(fam, p) & 0xFF00))
-        if fam in ("J", "JI", "JL"):
+        if fam in ("J", "JI", "JL", "JIL"):
             self.pc = S.anchor_addr(fam, p)
         else:
             self.pc = (self.pc + S.length_of(t)) & 0xFFFF
@@ -155,7 +155,7 @@ class Host:
         self.catch_up(self.cycles * 3)
         if fam in ("J", "JL") and not self.in_nmi:
             self.maybe_skip(S.anchor_addr(fam, p))
-        elif fam in ("JI", "R", "RL"):
+        elif fam in ("JI", "JIL", "R", "RL"):
             self.prev_body = None
             self.iter_toks = []
             self.iter_cycle0 = self.cycles

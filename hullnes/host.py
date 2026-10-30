@@ -98,7 +98,7 @@ class BoardHost(Host):
             self.board.apply(p & 0x3FFF)
         elif fam == "P":
             self.flag_i = p >> 2 & 1
-        elif fam == "JI":
+        elif fam in ("JI", "JIL"):
             self.flag_i = 1
 
     def render_line(self, line: int) -> None:
@@ -107,6 +107,17 @@ class BoardHost(Host):
             if line == 0:
                 self.board.scanline()  # the pre-render line's clock
             self.board.scanline()
+
+    def maybe_skip(self, target: int) -> None:
+        # nesformer's idle-loop skip fast-forwards a wait-for-NMI loop to vblank, which would
+        # jump over a scanline IRQ: don't skip while the board's IRQ is enabled
+        if getattr(self.board, "enabled", False):
+            self.prev_body = None
+            self.iter_toks = []
+            self.iter_cycle0 = self.cycles
+            self.iter_ev0 = self.ev_seq
+            return
+        super().maybe_skip(target)
 
     def wants_irq(self) -> bool:
         """At a record boundary: inject an IRQ now? (level-triggered: until acknowledged)"""

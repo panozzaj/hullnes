@@ -37,6 +37,7 @@ Token families (payload bit layout, LSB first):
   OB2             byte(8)                     operand byte 2
   JL      final   target(15)              like J, to an address below $8000
   RL      final   anchor(15)              like R, for a PC below $8000
+  JIL     final   target(15)              like JI, to an interrupt handler below $8000
   NMI     control injected by the host before a record: the interrupt sequence follows
   HALT    control the machine stopped (an unsupported opcode or a jump outside the ROM)
   GO      control the first token of a run (after the state snapshot)
@@ -49,7 +50,7 @@ FAMILY_SIZES = [
     ("P", 1 << 9), ("S", 1 << 10), ("NT", 4), ("J", 1 << 15), ("JI", 1 << 15), ("R", 1 << 15),
     ("LO", 256), ("HI", 256), ("PSH", 1 << 10), ("PUL", 256), ("IOR", 64), ("IN", 256),
     ("IOW", 1 << 16), ("DM", 1 << 16), ("MAP", 1 << 16),
-    ("OPF", 512), ("OB1", 512), ("OB2", 256), ("JL", 1 << 15), ("RL", 1 << 15),
+    ("OPF", 512), ("OB1", 512), ("OB2", 256), ("JL", 1 << 15), ("RL", 1 << 15), ("JIL", 1 << 15),
 ]
 FAMILIES = {}
 _base = 0
@@ -131,24 +132,23 @@ def length_of(t: int) -> int:
 def is_final(t: int) -> bool:
     """The token ends a record (the next token starts the next record)."""
     fam = family(t)[0]
-    return fam in ("J", "JI", "R", "JL", "RL", "HALT", "GO") or length_of(t) > 0
+    return fam in ("J", "JI", "R", "JL", "RL", "JIL", "HALT", "GO") or length_of(t) > 0
 
 
 def is_anchor(t: int) -> bool:
-    return family(t)[0] in ("J", "JI", "R", "JL", "RL")
+    return family(t)[0] in ("J", "JI", "R", "JL", "RL", "JIL")
 
 
 def anchor_addr(fam: str, p: int) -> int:
-    """The address an anchor token (J JI R JL RL) points at."""
-    return p if fam in ("JL", "RL") else 0x8000 + p
+    """The address an anchor token (J JI R JL RL JIL) points at."""
+    return p if fam in ("JL", "RL", "JIL") else 0x8000 + p
 
 
 def jump_tok(target: int, interrupt: bool = False) -> int:
     """J / JI to $8000-$FFFF, JL below."""
     if target >= 0x8000:
         return tok("JI" if interrupt else "J", target - 0x8000)
-    assert not interrupt
-    return tok("JL", target)
+    return tok("JIL" if interrupt else "JL", target)
 
 
 def name(t: int) -> str:
@@ -161,7 +161,7 @@ def name(t: int) -> str:
         return f"P({p & 63:06b} px{p >> 6 & 1} L{p >> 7})"
     if fam in ("J", "JI", "R"):
         return f"{fam}(${0x8000 + p:04X})"
-    if fam in ("JL", "RL"):
+    if fam in ("JL", "RL", "JIL"):
         return f"{fam}(${p:04X})"
     if fam in ("OPF", "OB1"):
         return f"{fam}(${p & 255:02X}{' last' if p >> 8 else ''})"

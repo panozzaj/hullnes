@@ -13,9 +13,9 @@ program, as in nesformer. Nobody trained these weights; a compiler computed ever
 same weights, run as a plain softmax transformer with no custom attention code, reproduce the
 trace too (`python -m hullnes dense`).
 
-Checked token for token against a reference 6502: Super Mario Bros., Mega Man, Mega Man 2,
-Mega Man 3, Metroid, The Legend of Zelda, Kid Icarus, Kirby's Adventure, Castlevania, Contra
-and DuckTales, plus nestest and the two homebrew games nesformer ships.
+Checked token for token against a reference 6502: Super Mario Bros., Super Mario Bros. 3,
+Mega Man, Mega Man 2, Mega Man 3, Metroid, The Legend of Zelda, Kid Icarus, Kirby's Adventure,
+Castlevania, Contra and DuckTales, plus nestest and the two homebrew games nesformer ships.
 
 ## Results
 
@@ -40,7 +40,8 @@ Checks (all in `tests/` or reproducible with `python -m hullnes check`):
   input of every piecewise-linear unit.
 - Free-running 900k tokens of Full Game and Thwaite: every token and every rendered frame equal
   to the reference CPU's, including across forced context rollovers.
-- Free-running 400k tokens of Super Mario Bros.: identical tokens and frames.
+- Free-running 400k tokens of Super Mario Bros. and 1.5M of Super Mario Bros. 3 (through its
+  status-bar IRQs): identical tokens and frames.
 - Teacher-forced 300k to 600k tokens of each of the other commercial games above: 0
   mismatches.
 - The dense softmax model (`hullnes/dense.py`), teacher-forced: nestest (4,600 tokens) and
@@ -177,10 +178,9 @@ tokens).
 ## Limitations
 
 - Official opcodes only; an unofficial opcode emits `HALT`.
-- Super Mario Bros. 3 and Kirby's Adventure stop soon after their first MMC3 IRQ (frames 13
-  and 310). The reference CPU stops at the same token, so the cause is in the host's IRQ or PPU
-  timing, not in the transformer. Mega Man 3 and 4 run through hundreds of IRQs.
 - No APU frame or DMC IRQs.
+- nesformer's idle-loop skip is off while an MMC3 IRQ is enabled (it would jump over the
+  scanline the IRQ fires on), so IRQ-heavy games run slower.
 - MMC1 boards above 256 KB (SUROM: Dragon Warrior III and IV) are not supported.
 - The PPU is in the host and renders per scanline, as in nesformer.
 - No sound.
@@ -197,6 +197,7 @@ uv run python -m hullnes check GAME.nes --tokens 300000   # free-run vs the refe
 uv run python -m hullnes trace GAME.nes --tokens 40
 uv run python -m hullnes info GAME.nes                    # model size for that board
 uv run python -m hullnes why GAME.nes 0086 075A           # who last wrote these RAM bytes
+uv run python -m hullnes hunt GAME.nes --fork-frame 300 --branches 8   # glitch hunting
 uv run python -m hullnes dense GAME.nes --tokens 3000     # run as a plain softmax transformer
 uv run pytest -q
 ```
@@ -212,6 +213,7 @@ uv run pytest -q
 | `hullnes/tokens.py` | vocabulary and prompt layout |
 | `hullnes/mapper.py` | NROM, UxROM, CNROM, MMC1, MMC3 |
 | `hullnes/dense.py` | the weights as dense matrices, run with ordinary softmax attention |
+| `hullnes/hunt.py` | fork at a frame (a savestate is a prompt), random inputs, flag odd traces |
 | `hullnes/host.py` | nesformer's host plus mapper boards |
 | `hullnes/run.py` | reference runs, teacher-forced check, free-running, rollover |
 | `third_party/chipformer/dsl` | Qwenputer's circuit DSL (MIT), plus a `Cumsum` node |
