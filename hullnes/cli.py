@@ -116,6 +116,12 @@ def boot_pc(rom) -> int:
     return boot(rom).pc
 
 
+def cmd_dense(a):
+    from hullnes.dense import verify
+
+    verify(load_cart(a.rom), a.tokens, a.pc, parse_buttons(a.buttons or ""))
+
+
 def cmd_info(a):
     cp = compiled(Config.for_board(load_cart(a.rom).board) if a.rom else Config())
     print(cp.stats())
@@ -152,6 +158,12 @@ def main(argv=None):
     y.add_argument("--frames", type=int, default=120)
     y.add_argument("--buttons", default="")
     y.set_defaults(fn=cmd_why)
+    dn = sub.add_parser("dense", help="check the weights as a plain softmax transformer")
+    dn.add_argument("rom")
+    dn.add_argument("--tokens", type=int, default=3000)
+    dn.add_argument("--buttons", default="")
+    dn.add_argument("--pc", type=lambda s: int(s, 16))
+    dn.set_defaults(fn=cmd_dense)
     i = sub.add_parser("info")
     i.add_argument("rom", nargs="?")
     i.set_defaults(fn=cmd_info)

@@ -80,7 +80,8 @@ def test_free_run_with_rollover(name):
 # Commercial cartridges are not in the repo; these run when NES_ROMS (a directory of .nes files) has them.
 LIBRARY = Path(os.environ.get("NES_ROMS", "/nonexistent")).expanduser()
 GAMES = ["Super Mario Bros. (World).nes", "Mega Man (USA).nes", "Metroid (USA).nes",
-         "Mega Man 2 (USA).nes", "Legend of Zelda, The (USA) (Rev A).nes"]
+         "Mega Man 2 (USA).nes", "Legend of Zelda, The (USA) (Rev A).nes", "Mega Man 3 (USA).nes",
+         "Kirby's Adventure (USA) (Rev A).nes"]
 
 
 def find_game(name):
@@ -98,3 +99,12 @@ def test_library_teacher_forced(name):
     assert not cpu.halted
     checked, bad, _ = check_trace(rom, trace)
     assert checked > 0 and not bad, bad[:3]
+
+
+@pytest.mark.skipif(not os.environ.get("HULLNES_SLOW"), reason="slow (set HULLNES_SLOW=1)")
+def test_dense_softmax_model():
+    """The weights as an ordinary softmax transformer reproduce the trace (about 2 minutes)."""
+    from hullnes.dense import verify
+
+    checked, bad = verify(cart("nestest.nes"), 1500, pc=0xC000, log=lambda *a: None)
+    assert checked > 1000 and bad == 0

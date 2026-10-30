@@ -7,13 +7,15 @@ emulator in [nesformer](https://github.com/dbreunig/nesformer), and reuses most 
 nesformer's trace format, reference CPU and host.
 
 What runs in the weights: the 6502 core (all official opcodes), 2 KB of work RAM, 8 KB of
-cartridge RAM, PRG-ROM of any size up to 256 KB, and the CPU side of four mapper boards
-(NROM, UxROM, CNROM, MMC1). The PPU, controllers and NMI timing run in a host program, as in
-nesformer. Nobody trained these weights; a compiler computed every one.
+cartridge RAM, PRG-ROM up to 512 KB, and the CPU side of five mapper boards (NROM, UxROM,
+CNROM, MMC1, MMC3). The PPU, controllers, NMI timing and MMC3's scanline counter run in a host
+program, as in nesformer. Nobody trained these weights; a compiler computed every one. The
+same weights, run as a plain softmax transformer with no custom attention code, reproduce the
+trace too (`python -m hullnes dense`).
 
 Checked token for token against a reference 6502: Super Mario Bros., Mega Man, Mega Man 2,
-Metroid, The Legend of Zelda, Kid Icarus, Castlevania, Contra and DuckTales, plus nestest and
-the two homebrew games nesformer ships.
+Mega Man 3, Metroid, The Legend of Zelda, Kid Icarus, Kirby's Adventure, Castlevania, Contra
+and DuckTales, plus nestest and the two homebrew games nesformer ships.
 
 ## Results
 
@@ -24,12 +26,12 @@ on the same machine (its README reports about 1,650 on the machine it was built 
 |---|---|---|
 | Architecture | `Qwen3_5ForCausalLM` (7 Gated DeltaNet layers) | plain decoder, 10 layers, 2D hardmax heads, ReGLU |
 | Memory | DeltaNet state rows, fixed size | the token trace, read by attention |
-| Residual width | 768 | 461 (NROM) to 557 (MMC1, 256 KB) |
-| Nonzero weights | 9.3M | 23k (NROM) to 39k (MMC1, 256 KB) |
+| Residual width | 768 | 461 (NROM) to 860 (MMC3, 512 KB) |
+| Nonzero weights | 9.3M | 23k (NROM) to 55k (MMC3, 512 KB) |
 | Attention heads | 7 layers of DeltaNet heads | 25 to 28 heads, 2 dims each |
-| Tokens/s, engine alone | 3,617 | 33,000 (NROM), 31,000 (UxROM), 22,000 (MMC1) |
+| Tokens/s, engine alone | 3,617 | 33,000 (NROM), 31,000 (UxROM), 22,000 (MMC1), 14,000 to 18,000 (MMC3) |
 | Speed vs a real NES, with the host | 150-290x slower (its README) | 6x (Mega Man) to 11x (Super Mario Bros., Zelda) slower |
-| Mappers | NROM | NROM, UxROM, CNROM, MMC1 |
+| Mappers | NROM | NROM, UxROM, CNROM, MMC1, MMC3 |
 | Code in RAM | halts | runs (Zelda and Kid Icarus need it) |
 
 Checks (all in `tests/` or reproducible with `python -m hullnes check`):
@@ -41,6 +43,9 @@ Checks (all in `tests/` or reproducible with `python -m hullnes check`):
 - Free-running 400k tokens of Super Mario Bros.: identical tokens and frames.
 - Teacher-forced 300k to 600k tokens of each of the other commercial games above: 0
   mismatches.
+- The dense softmax model (`hullnes/dense.py`), teacher-forced: nestest (4,600 tokens) and
+  Thwaite (20,000 tokens, with NMIs, I/O reads and sprite DMA), 0 mismatches. Its output stays
+  within 4e-8 of an integer.
 
 ## How it works
 
@@ -143,7 +148,16 @@ operand is `ram + rom` without a selection layer.
 A store to `$8000-$FFFF` on a mapper board becomes a `MAP` token whose payload says what the
 write did. For MMC1 that includes the serial shift register (five writes per register), so
 the model computes the shift state and the host reads CHR banks and mirroring from the same
-tokens. Bank state is a few more "latest" heads, folded into the ROM queries.
+tokens. Bank state is a few more "latest" heads. Each board describes, per 8 KB or 16 KB
+region of `$8000-$FFFF`, which literal selects which bank; a layer-1 FFN turns that into one
+"bank b is mapped here" literal per region and bank, and the ROM queries are sums of gated
+functions, one per (region, bank).
+
+MMC3's bank-data writes go to whichever register the last bank-select write named, so the
+model puts the target register into the `MAP` payload; R6 and R7 are then "the latest `MAP`
+that wrote register 6 / 7". Its scanline IRQ is counted by the host, which injects an `IRQ`
+token (like `NMI`, but only while the I flag, which the host follows through `P` and `JI`
+tokens, is clear). Inside the model an IRQ record is an NMI record with the other vector.
 
 Zelda and Kid Icarus run code from RAM. The opcode fetch happens in layer 3, before RAM write
 keys exist (layer 6), so the model cannot attend to RAM code directly. Instead, a record whose
@@ -163,7 +177,10 @@ tokens).
 ## Limitations
 
 - Official opcodes only; an unofficial opcode emits `HALT`.
-- No IRQs, so no MMC3 (the most common mapper in a typical collection) yet.
+- Super Mario Bros. 3 and Kirby's Adventure stop soon after their first MMC3 IRQ (frames 13
+  and 310). The reference CPU stops at the same token, so the cause is in the host's IRQ or PPU
+  timing, not in the transformer. Mega Man 3 and 4 run through hundreds of IRQs.
+- No APU frame or DMC IRQs.
 - MMC1 boards above 256 KB (SUROM: Dragon Warrior III and IV) are not supported.
 - The PPU is in the host and renders per scanline, as in nesformer.
 - No sound.
@@ -179,6 +196,8 @@ uv run python -m hullnes run ~/roms/smb.nes --frames 600 \
 uv run python -m hullnes check GAME.nes --tokens 300000   # free-run vs the reference CPU
 uv run python -m hullnes trace GAME.nes --tokens 40
 uv run python -m hullnes info GAME.nes                    # model size for that board
+uv run python -m hullnes why GAME.nes 0086 075A           # who last wrote these RAM bytes
+uv run python -m hullnes dense GAME.nes --tokens 3000     # run as a plain softmax transformer
 uv run pytest -q
 ```
 
@@ -191,7 +210,8 @@ uv run pytest -q
 | `hullnes/circuit.py` | the CPU as a circuit graph (the model's "source code") |
 | `hullnes/engine.py` | the forward pass with Li Chao tree attention caches (numba) |
 | `hullnes/tokens.py` | vocabulary and prompt layout |
-| `hullnes/mapper.py` | NROM, UxROM, CNROM, MMC1 |
+| `hullnes/mapper.py` | NROM, UxROM, CNROM, MMC1, MMC3 |
+| `hullnes/dense.py` | the weights as dense matrices, run with ordinary softmax attention |
 | `hullnes/host.py` | nesformer's host plus mapper boards |
 | `hullnes/run.py` | reference runs, teacher-forced check, free-running, rollover |
 | `third_party/chipformer/dsl` | Qwenputer's circuit DSL (MIT), plus a `Cumsum` node |
