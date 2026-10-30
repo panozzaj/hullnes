@@ -108,3 +108,19 @@ def test_dense_softmax_model():
 
     checked, bad = verify(cart("nestest.nes"), 1500, pc=0xC000, log=lambda *a: None)
     assert checked > 1000 and bad == 0
+
+
+@pytest.mark.parametrize("name", ["thwaite.nes", "full_game.nes"])
+def test_numba_ppu_matches_python_ppu(name):
+    """The compiled scanline renderer draws exactly what nesformer's Python one does."""
+    from hullnes.host import BoardHost
+
+    frames = {}
+    try:
+        for fast in (False, True):
+            BoardHost.fast_ppu = fast
+            _, h, _ = run_reference(cart(name), frames=200, buttons=parse_buttons(BUTTONS))
+            frames[fast] = [bytes(r) for f in h.frames for r in f]
+    finally:
+        BoardHost.fast_ppu = True
+    assert frames[True] == frames[False]

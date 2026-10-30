@@ -8,7 +8,9 @@ CHR banks (the PPU's pattern tables), and nametable mirroring.
 from dataclasses import dataclass
 from pathlib import Path
 
-from hullnes import mapper
+import numpy as np
+
+from hullnes import mapper, ppu
 from nesformer import spec as S
 from nesformer.host import EVENTS, FRAME_DOTS, Cart, Host
 
@@ -101,8 +103,24 @@ class BoardHost(Host):
         elif fam in ("JI", "JIL"):
             self.flag_i = 1
 
+    fast_ppu = True  # the numba renderer (hullnes/ppu.py); False: nesformer's Python one
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.fbuf = np.zeros((240, 256), np.uint8)
+        self.fb = list(self.fbuf)
+
     def render_line(self, line: int) -> None:
-        super().render_line(line)
+        if self.fast_ppu:
+            chr_pages, nt_pages = ppu.page_tables(self.board)
+            u8 = np.uint8
+            self.v, st = ppu.render_line(
+                line, self.fbuf[line], np.frombuffer(self.pal, u8), np.frombuffer(self.vram, u8),
+                np.frombuffer(self.oam, u8), np.frombuffer(self.cart.chr.data, u8), chr_pages,
+                nt_pages, self.mask, self.ctrl, self.x, self.v, self.t)
+            self.status |= st
+        else:
+            super().render_line(line)
         if hasattr(self.board, "scanline") and self.rendering():
             if line == 0:
                 self.board.scanline()  # the pre-render line's clock
