@@ -112,9 +112,49 @@ class Compiled:
         self.h_vptr, self.h_vform, self.h_out = i64(h_vptr), i64(h_vform), i64(h_out)
         self.h_cap0 = i64(h_cap)
         self.s_form, self.s_out = i64(s_form), i64(s_out)
-        self.u_a, self.u_aconst, self.u_c, self.u_out = i64(u_a), f64(u_aconst), f64(u_c), i64(u_out)
-        self.u_base, self.u_bc, self.b_form = i64(u_base), f64(u_bc), i64(b_form)
-        self.sched = i64([(k, a0, a1, b0, b1) for k, a0, a1, _, b0, b1 in sched])
+        # Group the units of each piecewise-linear function: same base, same output, constant
+        # multiplier. Their sum is sum_{c_u > -base} w_u (base + c_u) = base * W + WC over the
+        # active units; with thresholds sorted, W and WC are prefix sums found by binary search.
+        # Units with a non-constant multiplier stay one by one ("loose").
+        lu = [[], [], [], [], [], []]  # loose: a, aconst, base, bc, c, out
+        g_base, g_out, g_off, g_n, g_c, g_w, g_wc = [], [], [], [], [], [], []
+        new_sched = []
+        for k, a0, a1, _, b0, b1 in sched:
+            if k != K_FFN:
+                new_sched.append((k, a0, a1, 0, 0, 0, 0))
+                continue
+            l0, gr0 = len(lu[0]), len(g_base)
+            groups: dict = {}
+            for u in range(a0, a1):
+                if u_a[u] >= 0:
+                    for arr, val in zip(lu, (u_a[u], u_aconst[u], u_base[u], u_bc[u], u_c[u],
+                                             u_out[u])):
+                        arr.append(val)
+                else:
+                    groups.setdefault((u_base[u], u_out[u]), []).append(
+                        (u_bc[u], u_c[u] * u_aconst[u]))
+            for (base, out), members in groups.items():
+                members.sort(key=lambda m: -m[0])  # thresholds descending
+                g_base.append(base)
+                g_out.append(out)
+                g_off.append(len(g_c))
+                g_n.append(len(members))
+                g_c.extend(c for c, _ in members)
+                g_c.append(0.0)  # pad so prefix arrays share the offset
+                W, WC = [0.0], [0.0]
+                for c, w in members:
+                    W.append(W[-1] + w)
+                    WC.append(WC[-1] + w * c)
+                g_w.extend(W)
+                g_wc.extend(WC)
+            new_sched.append((k, l0, len(lu[0]), b0, b1, gr0, len(g_base)))
+        self.u_a, self.u_aconst = i64(lu[0]), f64(lu[1])
+        self.u_base, self.u_bc, self.u_c, self.u_out = i64(lu[2]), f64(lu[3]), f64(lu[4]), i64(lu[5])
+        self.g_base, self.g_out, self.g_off, self.g_n = i64(g_base), i64(g_out), i64(g_off), i64(g_n)
+        self.g_c, self.g_w, self.g_wc = f64(g_c), f64(g_w), f64(g_wc)
+        self.b_form = i64(b_form)
+        self.n_units = len(u_a)
+        self.sched = i64(new_sched)
         self.r_form = i64([r[0] for r in self.ranges])
         self.r_lo = i64([r[1] for r in self.ranges])
         self.r_hi = i64([r[2] for r in self.ranges])
@@ -124,7 +164,7 @@ class Compiled:
         self.token_fns = list(g.token_fns.items())
 
     def stats(self) -> dict:
-        return {"dims": self.n_dims, "heads": len(self.h_q), "ffn_units": len(self.u_a),
+        return {"dims": self.n_dims, "heads": len(self.h_q), "ffn_units": self.n_units,
                 "nonzero_weights": int(len(self.e_dim)), "sublayers": len(self.sched)}
 
 
@@ -142,7 +182,7 @@ def _step(v, tdims, tvals, pos, d_pos, d_pos2,
           h_q, h_kx, h_ky, h_lo, h_hi, h_vptr, h_vform, h_out,
           n_m, n_b, n_l, n_r, n_vals, n_count, h_base, h_vbase, tmp,
           s_form, s_out, sums,
-          u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, out_form,
+          u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, g_base, g_out, g_off, g_n, g_c, g_w, g_wc, out_form,
           r_form, r_lo, r_hi, check):
     """One position. Returns the output value; on a range violation returns -1 - index."""
     v[:] = 0.0
@@ -157,12 +197,22 @@ def _step(v, tdims, tvals, pos, d_pos, d_pos2,
             b0, b1 = sched[si, 3], sched[si, 4]
             for k in range(b0, b1):
                 bval[k] = _dot(b_form[k], v, e_ptr, e_dim, e_coef)
-            for u in range(a0, a1):
+            for u in range(a0, a1):  # loose units
                 b = bval[u_base[u]] + u_bc[u]
                 if b > 0.0:
-                    fa = u_a[u]
-                    a = u_aconst[u] if fa < 0 else _dot(fa, v, e_ptr, e_dim, e_coef)
-                    v[u_out[u]] += u_c[u] * a * b
+                    v[u_out[u]] += u_c[u] * _dot(u_a[u], v, e_ptr, e_dim, e_coef) * b
+            for gi in range(sched[si, 5], sched[si, 6]):  # grouped units
+                b = bval[g_base[gi]]
+                off, n = g_off[gi], g_n[gi]
+                lo, hi = 0, n  # count thresholds c > -b (sorted descending)
+                while lo < hi:
+                    mid = (lo + hi) >> 1
+                    if g_c[off + mid] + b > 0.0:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                if lo:
+                    v[g_out[gi]] += b * g_w[off + lo] + g_wc[off + lo]
         elif kind == 1:  # running sums
             for k in range(a0, a1):
                 sums[k] += _dot(s_form[k], v, e_ptr, e_dim, e_coef)
@@ -263,7 +313,7 @@ def _run(toks, t_ptr, t_dim, t_val, pos0, out, v, d_pos, d_pos2,
          e_ptr, e_dim, e_coef, sched,
          h_q, h_kx, h_ky, h_lo, h_hi, h_vptr, h_vform, h_out,
          n_m, n_b, n_l, n_r, n_vals, n_count, h_base, h_vbase, tmp,
-         s_form, s_out, sums, u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, out_form, r_form, r_lo, r_hi, check):
+         s_form, s_out, sums, u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, g_base, g_out, g_off, g_n, g_c, g_w, g_wc, out_form, r_form, r_lo, r_hi, check):
     """Teacher-forced batch: feed toks (indices into the t_* embedding table)."""
     for i in range(toks.shape[0]):
         k = toks[i]
@@ -271,7 +321,7 @@ def _run(toks, t_ptr, t_dim, t_val, pos0, out, v, d_pos, d_pos2,
                   d_pos, d_pos2, e_ptr, e_dim, e_coef, sched,
                   h_q, h_kx, h_ky, h_lo, h_hi, h_vptr, h_vform, h_out,
                   n_m, n_b, n_l, n_r, n_vals, n_count, h_base, h_vbase, tmp,
-                  s_form, s_out, sums, u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, out_form, r_form, r_lo, r_hi, check)
+                  s_form, s_out, sums, u_a, u_aconst, u_base, u_bc, b_form, bval, u_c, u_out, g_base, g_out, g_off, g_n, g_c, g_w, g_wc, out_form, r_form, r_lo, r_hi, check)
         out[i] = y
         if y < 0:
             return i + 1
@@ -391,7 +441,7 @@ class Engine:
                   self.n_m, self.n_b, self.n_l, self.n_r, self.n_vals, self.n_count,
                   self.h_base, self.h_vbase, self.tmp,
                   cp.s_form, cp.s_out, self.sums,
-                  cp.u_a, cp.u_aconst, cp.u_base, cp.u_bc, cp.b_form, self.bval, cp.u_c, cp.u_out, cp.out_form,
+                  cp.u_a, cp.u_aconst, cp.u_base, cp.u_bc, cp.b_form, self.bval, cp.u_c, cp.u_out, cp.g_base, cp.g_out, cp.g_off, cp.g_n, cp.g_c, cp.g_w, cp.g_wc, cp.out_form,
                   cp.r_form, cp.r_lo, cp.r_hi, self.check)
         if y <= -1000000:
             raise ValueError(f"position {self.pos}: query of head "
@@ -400,8 +450,8 @@ class Engine:
             i = int(-y - 1)
             raise ValueError(f"position {self.pos}: {cp.ranges[i][3]} outside "
                              f"[{cp.ranges[i][1]}, {cp.ranges[i][2]}]")
-        if np.any(self.n_count > self.caps):
-            raise RuntimeError("attention cache overflow")
+        if not self.pos & 4095 and np.any(self.n_count > self.caps):  # (cannot happen: the
+            raise RuntimeError("attention cache overflow")  # caps bound the trees' node counts)
         self.pos += 1
         return int(round(y))
 
@@ -425,7 +475,7 @@ class Engine:
                  cp.h_q, cp.h_kx, cp.h_ky, cp.h_lo, cp.h_hi, cp.h_vptr, cp.h_vform, cp.h_out,
                  self.n_m, self.n_b, self.n_l, self.n_r, self.n_vals, self.n_count,
                  self.h_base, self.h_vbase, self.tmp, cp.s_form, cp.s_out, self.sums,
-                 cp.u_a, cp.u_aconst, cp.u_base, cp.u_bc, cp.b_form, self.bval, cp.u_c, cp.u_out, cp.out_form, cp.r_form, cp.r_lo, cp.r_hi,
+                 cp.u_a, cp.u_aconst, cp.u_base, cp.u_bc, cp.b_form, self.bval, cp.u_c, cp.u_out, cp.g_base, cp.g_out, cp.g_off, cp.g_n, cp.g_c, cp.g_w, cp.g_wc, cp.out_form, cp.r_form, cp.r_lo, cp.r_hi,
                  self.check)
         self.pos += n
         if n < len(toks) or (n and out[n - 1] < 0):

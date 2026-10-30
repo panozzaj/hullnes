@@ -12,8 +12,14 @@ as "Show HN: A working Nintendo in ~1GB of Qwen weights". nesformer compiled the
 Qwen3.5 checkpoint. hullnes reuses its trace format, reference 6502 CPU, host (PPU, controllers,
 NMI timing), test ROMs and nestest checks, vendored with modifications in `third_party/nesformer`.
 hullnes exists because nesformer made a direct comparison possible: on the games nesformer
-supports, both models emit the same tokens and are checked against the same reference CPU. See [Credits](#credits) for the other
-projects it draws on.
+supports, both models emit the same tokens and are checked against the same reference CPU.
+
+The circuit compiler comes from [Qwenputer](https://github.com/divagr18/qwenputer) by Divyansh
+Agrawal, which nesformer also builds on. Qwenputer's `chipformer` has two targets: Qwen3.5's
+DeltaNet layers, which nesformer used, and an earlier one with 2D hardmax heads, ReGLU units and
+a Li Chao tree cache, the same building blocks as Percepta's construction. hullnes uses the
+earlier target (vendored in `third_party/chipformer`) and writes the 6502 for it from scratch in
+`hullnes/circuit.py`.
 
 | Thwaite | Full Game |
 |---|---|
@@ -55,8 +61,8 @@ tokens/s on the same machine (its README reports about 1,650 on the machine it w
 | Nonzero weights | 9.3M of 466.6M parameters | 2.8M (NROM) to 3.1M (MMC3, 512 KB), of which 25k to 62k are in the attention and FFN layers |
 | Size | 933 MB as bf16; 3.3 MB zipped | 3.2 GB (NROM) to 6.0 GB as dense fp64; 1.7 to 1.9 MB zipped |
 | Attention heads | 7 layers of DeltaNet heads | 25 to 28 heads, 2 dims each |
-| Tokens/s, engine alone | 3,617 | about 100,000 (NROM), 97,000 (UxROM), 79,000 (MMC1), 67,000 (MMC3) |
-| Speed vs a real NES, host included | 150-290x slower (its README) | 2.2x to 4.2x slower (table below) |
+| Tokens/s, engine alone | 3,617 | about 146,000 (NROM), 133,000 (UxROM), 114,000 (MMC1), 87,000 (MMC3) |
+| Speed vs a real NES, host included | 150-290x slower (its README) | 1.7x to 3.5x slower (table below) |
 | Mappers | NROM | NROM, UxROM, CNROM, MMC1, MMC3 |
 | Code in RAM | halts | runs |
 
@@ -74,11 +80,11 @@ second.
 
 | Game | Frames/s | Slower than a real NES |
 |---|---|---|
-| Mega Man | 27.74 | 2.2x |
-| Thwaite | 22.07 | 2.7x |
-| Super Mario Bros. | 20.47 | 2.9x |
-| The Legend of Zelda | 14.98 | 4.0x |
-| Super Mario Bros. 3 | 14.38 | 4.2x |
+| Mega Man | 34.49 | 1.7x |
+| Thwaite | 27.96 | 2.1x |
+| Super Mario Bros. | 25.82 | 2.3x |
+| The Legend of Zelda | 19.01 | 3.2x |
+| Super Mario Bros. 3 | 17.09 | 3.5x |
 
 nesformer's host fast-forwards idle wait loops. With an MMC3 IRQ enabled, that skip now stops
 before the scanline where the host's copy of the IRQ counter says the IRQ will fire, so
