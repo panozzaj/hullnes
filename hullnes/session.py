@@ -23,6 +23,24 @@ from nesformer.cpu import OPS
 from nesformer.host import frame_rgb, parse_buttons
 
 
+def normalize_buttons(spec: str, frames: int) -> str:
+    """Accept 'right' or 'right+b' (held for the whole step) as well as 'right@0-60'."""
+    parts = []
+    for part in filter(None, (x.strip() for x in (spec or "").split(","))):
+        parts.append(part if "@" in part else f"{part}@0-{frames}")
+    return ",".join(parts)
+
+
+def parse_addrs(spec: str, limit: int = 32) -> list[int]:
+    """'0086, 075A, 0090-0093' -> addresses (at most ``limit``)."""
+    out = []
+    for part in filter(None, (x.strip().replace("$", "") for x in str(spec or "").split(","))):
+        lo, _, hi = part.partition("-")
+        lo = int(lo, 16)
+        out.extend(range(lo, (int(hi, 16) if hi else lo) + 1))
+    return out[:limit]
+
+
 def _run(rom_path: str, state, host, frames: int, buttons: str, why=()):
     """Run ``frames`` frames (from the savestate, or from power-on), stop at the first record
     boundary after, and return (new savestate, writers of the ``why`` addresses)."""
@@ -30,6 +48,7 @@ def _run(rom_path: str, state, host, frames: int, buttons: str, why=()):
     ses = Session(rom)
     first = host.frame if host is not None else 0
     target = first + frames
+    buttons = normalize_buttons(buttons, frames)
     script = parse_buttons(buttons) if buttons else None
     btn = (lambda f: script(f - first)) if script else None
     out = {}
@@ -144,7 +163,7 @@ def cmd(a):
         print(describe(sv))
     elif a.scmd == "step":
         old = load(a.state)
-        why = [int(x.replace("$", ""), 16) for x in a.why.split(",") if x]
+        why = parse_addrs(a.why)
         sv, writers = _run(old["rom"], old["state"], old["host"], a.frames, a.buttons, why)
         save(sv, a.out, a.png)
         print(describe(sv))
