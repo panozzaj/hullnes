@@ -58,6 +58,9 @@ def _run(rom_path: str, state, host, frames: int, buttons: str, why=()):
     def on_token(t, h, p):
         if cur["pc"] is None:
             cur["pc"] = h.pc
+        if p < len(log):  # a context rollover restarted the positions
+            del log[p:]
+            log[:] = [None] * p  # what came before is now the prompt
         while len(log) < p:
             log.append(None)
         log.append((h.frame, cur["pc"], t))
@@ -85,7 +88,8 @@ def _run(rom_path: str, state, host, frames: int, buttons: str, why=()):
             mn = f"{OPS[op][0]} ({OPS[op][1]})" if op in OPS else "?"
             writers[a] = f"${val:02X}, written at frame {f} by the instruction at ${pc:04X} {mn}"
         else:
-            writers[a] = f"${val:02X}, not written during this step"
+            writers[a] = (f"${val:02X}, not written during this step (or written before a "
+                          f"context rollover inside it)")
     return {"rom": rom_path, "state": out["state"], "host": h}, writers
 
 

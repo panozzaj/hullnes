@@ -110,6 +110,13 @@ class BoardHost(Host):
         self.fbuf = np.zeros((240, 256), np.uint8)
         self.fb = list(self.fbuf)
 
+    def end_frame(self) -> None:
+        # copy from fbuf itself: after a pickle/deepcopy round trip the rows in self.fb are no
+        # longer views of fbuf, which is what the compiled renderer writes into
+        if self.keep_frames:
+            self.frames.append([bytes(r) for r in self.fbuf])
+        self.frame += 1
+
     def render_line(self, line: int) -> None:
         if self.fast_ppu:
             chr_pages, nt_pages = ppu.page_tables(self.board)

@@ -137,3 +137,20 @@ def test_compiled_loop_matches_python_loop(name):
                                engine=new_engine(cart(name), max_positions=150_000))
         runs[fast] = (toks, [bytes(r) for f in host.frames for r in f], host.rollovers)
     assert runs[True] == runs[False] and runs[True][2] >= 1
+
+
+def test_session_savestates_continue_exactly(tmp_path):
+    """A savestate (machine state read out of the model + a pickled host) continues exactly:
+    the frame after new + step equals the same frame of an uninterrupted run."""
+    from hullnes.session import _run, load, save
+
+    rom = str(ROMS / "thwaite.nes")
+    sv, _ = _run(rom, None, None, 100, "start@90-95")
+    save(sv, tmp_path / "s0.pkl")
+    old = load(tmp_path / "s0.pkl")
+    sv2, _ = _run(rom, old["state"], old["host"], 60, "a@10-14")
+    _, host = run_model(cart("thwaite.nes"), frames=sv2["host"].frame,
+                        buttons=parse_buttons("start@90-95,a@" + f"{sv['host'].frame + 10}-"
+                                              f"{sv['host'].frame + 14}"), fast=False)
+    assert sv2["host"].frames[-1] == [bytes(r) for r in host.frames[-1]]
+    assert sv2["host"].frames[-1] != sv["host"].frames[-1]
