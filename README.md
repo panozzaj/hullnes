@@ -308,3 +308,10 @@ See [roms/SOURCES.md](roms/SOURCES.md):
 - nestest by Kevin Horton
 - Full Game by Doug Fraker (MIT)
 - Thwaite by Damian Yerrick (GPL-3.0)
+
+## License
+
+hullnes is released under the MIT License (see [LICENSE](LICENSE)). The vendored code in
+`third_party/` keeps its own MIT licenses (`third_party/nesformer/LICENSE`,
+`third_party/chipformer/LICENSE`), and the ROMs in `roms/` keep theirs, listed in
+`roms/SOURCES.md`.
