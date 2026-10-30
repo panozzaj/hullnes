@@ -8,7 +8,7 @@ NES.
 
 hullnes builds directly on [nesformer](https://github.com/dbreunig/nesformer) by
 [Drew Breunig](https://www.dbreunig.com/) ([`@dbreunig`](https://github.com/dbreunig)), posted
-as "Show HN: A working Nintendo in ~1GB of Qwen weights". nesformer compiled the same CPU into a
+as [Show HN: A working Nintendo in ~1GB of Qwen weights](https://news.ycombinator.com/item?id=50306442). nesformer compiled the same CPU into a
 Qwen3.5 checkpoint. hullnes reuses its trace format, reference 6502 CPU, host (PPU, controllers,
 NMI timing), test ROMs and nestest checks, vendored with modifications in `third_party/nesformer`.
 hullnes exists because nesformer made a direct comparison possible: on the games nesformer
@@ -226,10 +226,13 @@ position q". A [Li Chao tree](https://cp-algorithms.com/geometry/convex_hull_tri
 answers that in O(log range) per insert and per query. Points with a hull and lines with an
 upper envelope are two views of the same problem.
 
-The O(log n) bound matters for Percepta's WebAssembly interpreter, whose context grows without
-bound. nesformer does not have the problem: Gated DeltaNet is recurrent, so its per-token cost is
-already constant. hullnes's speedup over nesformer comes from the model being small (section 5)
-and from an engine that evaluates its sparse layers directly, not from the hull.
+The hull is what makes "memory is the trace" affordable. A context here holds up to a million
+positions; scoring every cached key in 25 heads would be about 25M operations per token, roughly
+100 tokens/s (the dense softmax check runs at about that speed with only 35k positions). With
+the tree, each lookup is about 20 steps. It is not why hullnes is faster than nesformer:
+nesformer never had the problem, because Gated DeltaNet is recurrent and its per-token cost is
+constant. The speedup over nesformer comes from the model being small (section 5) and from an
+engine that evaluates its sparse layers directly.
 
 ### 4. The program counter
 
