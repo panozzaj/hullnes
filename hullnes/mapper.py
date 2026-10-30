@@ -9,6 +9,10 @@ the trace alone:
   MMC1           payload = val5 | count << 5 | commit << 8 | reg << 9
                  a shift write: val5 = shift-register contents after it, count = bits so far;
                  a commit (5th write, or a reset with bit 7): register ``reg`` = val5
+  MMC3           payload = byte | kind << 8 | target << 11
+                 kind: 0 bank select, 1 bank data, 2 mirroring, 3 PRG-RAM protect,
+                 4 IRQ latch, 5 IRQ reload, 6 IRQ disable, 7 IRQ enable (from the address);
+                 target: the bank register a bank-data write goes to (select & 7)
 
 ``write`` is the board's logic (used by the reference CPU), ``apply`` replays a token's payload
 (used by everyone who reads the trace). The circuit (circuit.py) computes the same payloads.
@@ -156,7 +160,89 @@ class MMC1(Board):
         return out
 
 
-BOARDS = {0: NROM, 1: MMC1, 2: UxROM, 3: CNROM}
+def mmc3_payload(v: int, kind: int, target: int) -> int:
+    return v | kind << 8 | target << 11
+
+
+@dataclass
+class MMC3(Board):
+    regs: list = field(default_factory=lambda: [0, 2, 4, 5, 6, 7, 0, 1])
+    select: int = 0
+    horizontal: int = 0
+    latch: int = 0
+    counter: int = 0
+    reload: bool = False
+    enabled: bool = False
+    irq_pending: bool = False
+
+    BANK8 = 0x2000
+
+    @property
+    def n8(self) -> int:
+        return len(self.prg) // self.BANK8
+
+    def payload(self, ea: int, v: int) -> int:
+        kind = ((ea - 0x8000) >> 13) * 2 + (ea & 1)
+        return mmc3_payload(v, kind, self.select & 7)
+
+    def apply(self, p: int) -> None:
+        v, kind, target = p & 255, p >> 8 & 7, p >> 11 & 7
+        if kind == 0:
+            self.select = v
+        elif kind == 1:
+            self.regs[target] = v
+        elif kind == 2:
+            self.horizontal = v & 1
+        elif kind == 4:
+            self.latch = v
+        elif kind == 5:
+            self.counter, self.reload = 0, True
+        elif kind == 6:
+            self.enabled = self.irq_pending = False
+        elif kind == 7:
+            self.enabled = True
+
+    def bank8(self, a: int) -> int:
+        """The 8 KB PRG bank mapped at a ($8000-$FFFF)."""
+        r6, r7 = self.regs[6] & (self.n8 - 1), self.regs[7] & (self.n8 - 1)
+        slot = (a - 0x8000) >> 13
+        mode = self.select >> 6 & 1
+        return [[r6, r7, self.n8 - 2, self.n8 - 1], [self.n8 - 2, r7, r6, self.n8 - 1]][mode][slot]
+
+    def prg_index(self, a: int) -> int:
+        return self.bank8(a) * self.BANK8 + (a & 0x1FFF)
+
+    def chr_index(self, a: int) -> int:
+        a &= 0x1FFF
+        if self.select & 0x80:
+            a ^= 0x1000
+        if a < 0x1000:  # two 2 KB banks
+            bank = (self.regs[a >> 11] & 0xFE) * 0x400 + (a & 0x7FF)
+        else:  # four 1 KB banks
+            bank = self.regs[2 + ((a - 0x1000) >> 10)] * 0x400 + (a & 0x3FF)
+        return bank % self.chr_size
+
+    def nt_index(self, a: int) -> int:
+        a &= 0x0FFF
+        if not self.horizontal:
+            return a & 0x07FF
+        return (a & 0x03FF) | (a & 0x0800) >> 1
+
+    def scanline(self) -> None:
+        """One clock of the IRQ counter (a rendered scanline)."""
+        if self.counter == 0 or self.reload:
+            self.counter, self.reload = self.latch, False
+        else:
+            self.counter -= 1
+        if self.counter == 0 and self.enabled:
+            self.irq_pending = True
+
+    def state_payloads(self) -> list[int]:
+        return [mmc3_payload(self.regs[i], 1, i) for i in range(8)] + [
+            mmc3_payload(self.select, 0, 0), mmc3_payload(self.horizontal, 2, 0)]
+
+
+BOARDS = {0: NROM, 1: MMC1, 2: UxROM, 3: CNROM, 4: MMC3}
 
 
 def parse(data: bytes):
@@ -166,14 +252,16 @@ def parse(data: bytes):
     nprg, nchr, f6, f7 = data[4], data[5], data[6], data[7]
     number = (f6 >> 4) | (f7 & 0xF0)
     if number not in BOARDS:
-        raise ValueError(f"mapper {number} is not supported (0, 1, 2, 3)")
+        raise ValueError(f"mapper {number} is not supported (0, 1, 2, 3, 4)")
     off = 16 + (512 if f6 & 4 else 0)
     prg = data[off:off + BANK * nprg]
     if number == 0 and nprg == 1:
         prg = prg * 2
     chr_ = data[off + BANK * nprg:off + BANK * nprg + 8192 * nchr]
-    if len(prg) & (len(prg) - 1) or len(prg) > 0x40000:
-        raise ValueError(f"PRG size {len(prg)} not supported (a power of two up to 256 KB)")
+    cap = 0x80000 if number == 4 else 0x40000
+    if len(prg) & (len(prg) - 1) or len(prg) > cap:
+        raise ValueError(f"PRG size {len(prg)} not supported (a power of two up to "
+                         f"{cap // 1024} KB)")
     board = BOARDS[number](number, bytes(prg), len(chr_) or 8192, bool(f6 & 1),
-                           prgram=number == 1)
+                           prgram=number in (1, 4))
     return board, bytearray(chr_ if nchr else bytes(8192)), nchr == 0

@@ -55,6 +55,7 @@ from nesformer import spec as S
 from nesformer.cpu import BRANCH_FLAG, LENGTH, OPS, PAGE_PENALTY
 
 MAX_POS = 1 << 20  # positions must stay below this (recency term of the RAM head)
+MAP_LEN = 1 << 14  # LEN's place in a MAP payload
 BIG = 1 << 18  # gate offset for piecewise-linear units (> any gated argument range)
 
 MNS = sorted({mn for mn, _, _ in OPS.values()})
@@ -111,7 +112,7 @@ def vlen(fam: str, p: int) -> int:
     if fam == "IOW":
         return p >> 14
     if fam == "MAP":
-        return p >> 11
+        return p >> 14
     return 0
 
 
@@ -206,16 +207,18 @@ def p_tok(C, Z, I, D, V, N, px, ln) -> Expr:
     return base("P") + C + 2 * Z + 4 * I + 8 * D + 16 * V + 32 * N + 64 * px + 128 * ln
 
 
-# --- PRG banking: each board's states, their literals, and the PRG index of a CPU address -----
+# --- PRG banking: which bank each region of $8000-$FFFF shows, as literals ---------------------
 
-def board_states(c: NesCircuit, tf, is_map):
-    """Latest heads for the board's CPU-visible state. Returns (states, extra) where states is a
-    list of (literals, index_fn(a) -> PRG offset) and extra holds dims the circuit needs."""
+def board_regions(c: NesCircuit, tf, is_map):
+    """Latest heads for the board's CPU-visible state. Returns (regions, extra): regions is a
+    list of (first address, size, [(literals, bank)]) where exactly one entry's literals hold
+    (an entry with no literals always holds), and extra holds dims the circuit needs."""
     cfg = c.cfg
     n16 = cfg.n16
     extra = {}
-    if cfg.board in (0, 3):  # fixed PRG
-        return [([], lambda a: (a - 0x8000) % cfg.n_prg)], extra
+    K16 = BANK
+    if cfg.board in (0, 3):  # fixed 32 KB
+        return [(0x8000, K16, [([], 0)]), (0xC000, K16, [([], n16 - 1)])], extra
     if cfg.board == 2:  # UxROM: switchable 16 KB at $8000, last bank at $C000
         onehot = [tf(f"uxrom.bank{b}", lambda fm, p, b=b: int(fm == "MAP" and (p & 255)
                                                               & (n16 - 1) == b))
@@ -223,10 +226,10 @@ def board_states(c: NesCircuit, tf, is_map):
         val = tf("uxrom.val", lambda fm, p: (p & 255) if fm == "MAP" else 0)
         got = c.latest(is_map, [val, *onehot], "uxrom")
         extra["map_dims"] = {"bank": got[0]}
-
-        def idx(b):
-            return lambda a: (b if a < 0xC000 else n16 - 1) * BANK + (a & 0x3FFF)
-        return [([got[1 + b]], idx(b)) for b in range(n16)], extra
+        return [(0x8000, K16, [([got[1 + b]], b) for b in range(n16)]),
+                (0xC000, K16, [([], n16 - 1)])], extra
+    if cfg.board == 4:
+        return mmc3_regions(c, tf, is_map, extra), extra
     assert cfg.board == 1  # MMC1
 
     def commit(reg):
@@ -254,41 +257,69 @@ def board_states(c: NesCircuit, tf, is_map):
     extra["map_dims"] = {"ctrl": ctrl, "prg": prg, "shift": shift, "count": count}
     extra["mmc1"] = dict(ctrl=ctrl, c2=c2, c3=c3, shift=shift, CNT=CNT)
 
-    def idx(m, p):
-        def f(a):
-            if m < 2:
-                return (p & ~1) * BANK + (a & 0x7FFF)
-            if m == 2:
-                return (0 if a < 0xC000 else p) * BANK + (a & 0x3FFF)
-            return (p if a < 0xC000 else n16 - 1) * BANK + (a & 0x3FFF)
-        return f
-    return [([MODE[m], PRG[p]], idx(m, p)) for m in range(4) for p in range(n16)], extra
+    def bank(m, p, hi):
+        if m < 2:
+            return (p & ~1) + hi
+        if m == 2:
+            return p if hi else 0
+        return n16 - 1 if hi else p
+    return [(lo, K16, [([MODE[m], PRG[p]], bank(m, p, hi)) for m in range(4) for p in range(n16)])
+            for hi, lo in enumerate((0x8000, 0xC000))], extra
 
 
-def region_banks(c: NesCircuit, states):
-    """Per 16 KB region ($8000, $C000) and bank: a literal "this bank is mapped there" and the
-    ROM-head position of an address a ($8000-$FFFF) when it is (else 0). Each bank's literal is
-    one FFN node over the board states that map it (layer 1), so the ROM queries need one
-    gated function per bank instead of one per board state."""
+def mmc3_regions(c: NesCircuit, tf, is_map, extra):
+    """MMC3: 8 KB regions. Mode 0: R6, R7, second-last, last; mode 1: second-last, R7, R6, last.
+    The board's bank-select and bank-data writes are MAP tokens whose payload names the target
+    register, so R6 and R7 are "latest MAP token that wrote register 6 / 7"."""
+    n8 = c.cfg.n_prg // 0x2000
+
+    def kind(fm, p):
+        return (p >> 8 & 7) if fm == "MAP" else -1
+
+    is_sel = tf("mmc3.sel_write", lambda fm, p: int(kind(fm, p) == 0))
+    val = tf("mmc3.val", lambda fm, p: (p & 255) if fm == "MAP" else 0)
+    mode1 = tf("mmc3.mode1", lambda fm, p: (p >> 6 & 1) if fm == "MAP" else 0)
+    tgt = tf("mmc3.target", lambda fm, p: (p & 7) if fm == "MAP" else 0)
+    sel, M1, TGT = c.latest(is_sel, [val, mode1, tgt], "mmc3.select")
+    regs = {}
+    for r in (6, 7):
+        is_r = tf(f"mmc3.r{r}_write", lambda fm, p, r=r: int(kind(fm, p) == 1 and p >> 11 & 7 == r))
+        hots = [tf(f"mmc3.r{r}={b}", lambda fm, p, b=b: int(fm == "MAP" and (p & 255) & (n8 - 1)
+                                                             == b)) for b in range(n8)]
+        regs[r] = c.latest(is_r, [val, *hots], f"mmc3.r{r}")
+    extra["map_dims"] = {"select": sel, "r6": regs[6][0], "r7": regs[7][0]}
+    extra["mmc3"] = dict(target=TGT)
+    R6, R7 = regs[6][1:], regs[7][1:]
+    K8 = 0x2000
+    return [
+        (0x8000, K8, [([1 - M1, R6[b]], b) for b in range(n8)] + [([M1], n8 - 2)]),
+        (0xA000, K8, [([R7[b]], b) for b in range(n8)]),
+        (0xC000, K8, [([M1, R6[b]], b) for b in range(n8)] + [([1 - M1], n8 - 2)]),
+        (0xE000, K8, [([], n8 - 1)]),
+    ]
+
+
+def region_banks(c: NesCircuit, regions):
+    """Per region and bank: a literal "this bank is mapped there" (one FFN node over the
+    entries that map it, in layer 1) and the ROM-head position of an address a when a is in that
+    region (else 0). ROM queries then need one gated function per (region, bank)."""
     rom_pos = c.cfg.layout.rom_pos
     out = []
-    for r, lo in enumerate((0x8000, 0xC000)):
+    for lo, size, entries in regions:
         by_bank: dict[int, list] = {}
-        for lits, ix in states:
-            b = ix(lo) // BANK
-            for a in (lo, lo + 0x1234, lo + 0x3FFF):
-                assert ix(a) == b * BANK + (a & 0x3FFF), "PRG index must be bank * 16K + offset"
+        for lits, b in entries:
             by_bank.setdefault(b, []).append(lits)
         for b, group in sorted(by_bank.items()):
-            if group == [[]]:
-                lit = []  # a fixed bank
+            if [] in group:
+                assert group == [[]] and len(entries) == 1, "a fixed bank must be the only entry"
+                lit = []
             elif len(group) == 1 and len(group[0]) == 1:
                 lit = group[0]
             else:
-                lit = [c.ffn([(1, c.one, c.AND(g)) for g in group], f"bank{r}={b}")]
+                lit = [c.ffn([(1, c.one, c.AND(g)) for g in group], f"bank@{lo:X}={b}")]
 
-            def g(a, r=r, b=b):
-                return rom_pos + b * BANK + (a & 0x3FFF) if (a >= 0xC000) == bool(r) else 0
+            def g(a, lo=lo, size=size, b=b):
+                return rom_pos + b * size + (a - lo) if lo <= a < lo + size else 0
             out.append((lit, g))
     return out
 
@@ -319,7 +350,8 @@ def build(cfg: Config = Config()) -> NesCircuit:
                   if fm in ("J", "JI", "R", "JL", "RL") else 0)
     is_ = {fm: tf(f"is_{fm}", isf(fm)) for fm in
            ["A", "X", "Y", "LO", "HI", "IN", "IOR", "IOW", "DM", "PSH", "PUL", "P", "ST", "RM",
-            "NMI", "GO", "RB", "RI", "MAP", "OPF", "OB1", "OB2"]}
+            "NMI", "IRQ", "GO", "RB", "RI", "MAP", "OPF", "OB1", "OB2"]}
+    is_int = is_["NMI"] + is_["IRQ"]  # an injected interrupt (same record shape, two vectors)
 
     def byte_of(*fams):
         fs = set(fams)
@@ -404,7 +436,7 @@ def build(cfg: Config = Config()) -> NesCircuit:
     LO, LO7, LO3, LO5 = c.latest(is_["LO"], [lo_val, lo_b7, lo_l3, lo_l5], "LO")
     (HI,) = c.latest(is_["HI"], [hi_val], "HI")
     (PAGE,) = c.latest(is_["IOW"], [iow_val], "IOW")
-    nmi_pos, nmi_found = c.latest(is_["NMI"], [pos, is_["NMI"]], "NMI")
+    nmi_pos, nmi_found, irqk = c.latest(is_int, [pos, is_int, is_["IRQ"]], "NMI")
     (started,) = c.latest(is_["GO"], [is_["GO"]], "GO")
     # instruction bytes of code in RAM (zeros in a record that has none)
     lat_op = c.latest(is_["OPF"] + f_fin, [op_valid, op_len, *op_mn.values(), *op_mode.values()],
@@ -412,9 +444,9 @@ def build(cfg: Config = Config()) -> NesCircuit:
     lat_b1 = c.latest(is_["OB1"] + f_fin, [ob1_val, ob1_b7, ob1_l3, ob1_l5], "latch.b1")
     lat_b2 = c.latest(is_["OB2"] + f_fin, [ob2_val, ob2_b7], "latch.b2")
     (nf,) = c.latest(is_fetch + f_fin, [f_nf], "latch.n")
-    states, extra = board_states(c, tf, is_["MAP"])
+    regions, extra = board_regions(c, tf, is_["MAP"])
     c.map_dims = extra.get("map_dims", {})
-    banks = region_banks(c, states)
+    banks = region_banks(c, regions)
 
     # =========================================================================== L1 ffn
     j = pos - fpos - nf  # tokens of the current record so far (after any instruction fetch)
@@ -544,7 +576,7 @@ def build(cfg: Config = Config()) -> NesCircuit:
         ([MODE["ind"], *S0], absa), ([MODE["ind"], is_["LO"], nNM], ptr2),
         ([mns("RTS", "RTI", "PLA", "PLP"), is_["PUL"], nNM], 0x100 + SP),
         ([MN["BRK"], is_["PSH"], JJ3, nNM], 0xFFFE), ([MN["BRK"], is_["LO"], nNM], 0xFFFF),
-        ([NM, is_["PSH"], JJ3], 0xFFFA), ([NM, is_["LO"]], 0xFFFB),
+        ([NM, is_["PSH"], JJ3], 0xFFFA + 4 * irqk), ([NM, is_["LO"]], 0xFFFB + 4 * irqk),
         ([is_dma + is_["DM"]], 256 * PAGE + dm_idx + is_["DM"]),
     ]
     qa = c.sel(qa_cases, "qa")
@@ -565,7 +597,7 @@ def build(cfg: Config = Config()) -> NesCircuit:
         ([MN["JSR"], b2_7 + abs_ram, *S0], pch), ([MN["JSR"], is_["PSH"], JJ1, nNM], pcl),
         ([MN["BRK"], *S0], pch), ([MN["BRK"], is_["PSH"], JJ1, nNM], pcl),
         ([MN["BRK"], is_["PSH"], JJ2, nNM], pbyte + 16),
-        ([is_["NMI"]], pch), ([NM, is_["PSH"], JJ1], pcl), ([NM, is_["PSH"], JJ2], pbyte),
+        ([is_int], pch), ([NM, is_["PSH"], JJ1], pcl), ([NM, is_["PSH"], JJ2], pbyte),
         ([MN["PHA"], *S0], A), ([MN["PHP"], *S0], pbyte + 16),
     ]
     psh_data = c.sel([([started, *lits], v) for lits, v in psh_cases], "push.data")
@@ -605,6 +637,10 @@ def build(cfg: Config = Config()) -> NesCircuit:
     wl = wl + c.sel([(lits, SP) for lits in psh_lits], "wkey.sp")
     if cfg.board == 1:
         mreg = c.pwl(qa, 0, 0xFFFF, lambda a: a >> 13 & 3, "mmc1.reg")
+    if cfg.board == 4:  # register kind from address bits 13-14 and bit 0 (from EA's low bits)
+        kind = 2 * c.pwl(qa, 0, 0xFFFF, lambda a: (a - 0x8000) >> 13 if a >= 0x8000 else 0,
+                         "mmc3.kind_hi") + c.pwl(l3, 0, 7, lambda v: v & 1, "mmc3.kind_lo")
+        mmc3_pay = 256 * kind + 2048 * extra["mmc3"]["target"]
 
     # =========================================================================== L6
     wh_p, wl_p, psh_p = c.prev([wh, wl, psh_data], "prev.write")
@@ -692,12 +728,12 @@ def build(cfg: Config = Config()) -> NesCircuit:
         """The MAP token of a write of a byte with bits b0, b7 to MMC1's serial port."""
         m1 = extra["mmc1"]
         case([*lits, b7], base("MAP") + m1["ctrl"] + 4 * (1 - m1["c2"]) + 8 * (1 - m1["c3"])
-             + 256 + 2048 * LEN)
+             + 256 + MAP_LEN * LEN)
         for k in range(4):
             case([*lits, 1 - b7, m1["CNT"][k]],
-                 base("MAP") + m1["shift"] + (1 << k) * b0 + 32 * (k + 1) + 2048 * LEN)
+                 base("MAP") + m1["shift"] + (1 << k) * b0 + 32 * (k + 1) + MAP_LEN * LEN)
         case([*lits, 1 - b7, m1["CNT"][4]],
-             base("MAP") + m1["shift"] + 16 * b0 + 256 + 512 * mreg + 2048 * LEN)
+             base("MAP") + m1["shift"] + 16 * b0 + 256 + 512 * mreg + MAP_LEN * LEN)
 
     final_stage = [[direct, *S0, 1 - r_io], [is_["IN"], nNM], [ind_y, is_["HI"], nNM, 1 - r_io]]
     ior_stage = [[direct, *S0, r_io], [ind_y, is_["HI"], nNM, r_io]]
@@ -726,7 +762,9 @@ def build(cfg: Config = Config()) -> NesCircuit:
         case([stores, *st, r_io, 1 - is4014], base("IOW") + sval + 256 * ioreg + 16384 * LEN)
         case([stores, *st, st_mem], base("ST") + sval + 256 * a7 + 512 * LEN)
         if cfg.board in (2, 3):
-            case([stores, *st, r_rom], base("MAP") + sval + 2048 * LEN)
+            case([stores, *st, r_rom], base("MAP") + sval + MAP_LEN * LEN)
+        elif cfg.board == 4:
+            case([stores, *st, r_rom], base("MAP") + sval + mmc3_pay + MAP_LEN * LEN)
         elif cfg.board == 1:
             mmc1_write([stores, *st, r_rom], sv0, sv7)
     case([is_dma], base("DM") + Mz)
@@ -744,8 +782,9 @@ def build(cfg: Config = Config()) -> NesCircuit:
         case([MN[mn], is_["IN"], nNM], tok)
         if mapper_board:  # RMW on the board's registers: RM (not final), then MAP
             case([MN[mn], direct, *S0, r_rom], tok - 1024 * LEN)
-    if cfg.board in (2, 3):  # the modified byte is written: it is the RM token's payload
-        case([rmw, rm_mid, nNM], base("MAP") + rm_val + 2048 * LEN)
+    if cfg.board in (2, 3, 4):  # the modified byte is written: it is the RM token's payload
+        case([rmw, rm_mid, nNM], base("MAP") + rm_val + MAP_LEN * LEN +
+             (mmc3_pay if cfg.board == 4 else 0))
     if cfg.board == 1:  # MMC1 ignores the second (modified) write: the original byte counts
         mmc1_write([rmw, rm_mid, nNM], Mb[0], M7)
     case([rmw, direct, *S0, r_io], ior)
@@ -784,7 +823,7 @@ def build(cfg: Config = Config()) -> NesCircuit:
     case([MN["RTI"], is_["PUL"], J5, nNM, 1 - M7 - ind_ram], S.tok("HALT"))
     for intr, extra_l in ((MN["BRK"], [nNM]), (NM, [])):
         if intr is NM:
-            case([is_["NMI"]], tokexpr("PSH", spm))
+            case([is_int], tokexpr("PSH", spm))
         else:
             case([intr, *S0], tokexpr("PSH", spm))
         case([intr, is_["PSH"], JJ1, *extra_l], tokexpr("PSH", spm))

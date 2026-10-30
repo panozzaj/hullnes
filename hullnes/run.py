@@ -52,6 +52,10 @@ def run_reference(rom: Rom, frames: int = 60, buttons=None, max_tokens: int | No
             toks.append(S.tok("NMI"))
             host.feed(toks[-1])
             gen = cpu.nmi_record()
+        elif host.wants_irq():
+            toks.append(S.tok("IRQ"))
+            host.feed(toks[-1])
+            gen = cpu.irq_record()
         else:
             gen = cpu.record()
         send = None
@@ -71,7 +75,7 @@ def run_reference(rom: Rom, frames: int = 60, buttons=None, max_tokens: int | No
 
 
 def injected(t: int) -> bool:
-    return t == S.tok("NMI") or S.family(t)[0] == "IN"
+    return t in (S.tok("NMI"), S.tok("IRQ")) or S.family(t)[0] == "IN"
 
 
 class Session:
@@ -117,6 +121,10 @@ class Session:
             payloads = [mmc1_payload(md["ctrl"], 0, 1, 0), mmc1_payload(md["prg"], 0, 1, 3)]
             if md["count"]:
                 payloads.append(mmc1_payload(md["shift"], md["count"], 0, 0))
+        elif board == 4:
+            from hullnes.mapper import mmc3_payload
+            payloads = [mmc3_payload(md["r6"], 1, 6), mmc3_payload(md["r7"], 1, 7),
+                        mmc3_payload(md["select"], 0, 0)]
         else:
             payloads = []
         return dict(A=int(d("A[0]")), X=int(d("X[0]")), Y=int(d("Y[0]")), SP=int(d("SP[0]")),
@@ -181,12 +189,12 @@ def run_model(rom: Rom, frames: int = 60, buttons=None, max_tokens: int | None =
     go = ses.boot_prompt(pc)
     toks = [go]
     pred = eng.step(go)
-    halt, nmi = S.tok("HALT"), S.tok("NMI")
+    halt, nmi, irq = S.tok("HALT"), S.tok("NMI"), S.tok("IRQ")
     seen = rollovers = 0
     while host.frame < frames and not host.halted:
         if max_tokens is not None and len(toks) >= max_tokens:
             break
-        t = nmi if host.wants_nmi() else pred
+        t = nmi if host.wants_nmi() else irq if host.wants_irq() else pred
         batch = [t]
         host.feed(t)
         if IOR_BASE <= t < IOR_BASE + 64:

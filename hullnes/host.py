@@ -77,9 +77,12 @@ class Rom:
 
 
 class BoardHost(Host):
-    """Host + a mapper board updated from MAP tokens."""
+    """Host + a mapper board updated from MAP tokens. For MMC3 it also clocks the board's IRQ
+    counter once per rendered scanline and asks for an IRQ (like an NMI, but only while the
+    CPU's I flag is clear; the host follows I through P and JI tokens)."""
 
     board: object = None
+    flag_i: int = 1
 
     @classmethod
     def for_rom(cls, rom: Rom, **kw) -> "BoardHost":
@@ -90,8 +93,25 @@ class BoardHost(Host):
 
     def feed(self, t: int) -> None:
         super().feed(t)  # the instruction's opcode was fetched before its write took effect
-        if MAP_BASE <= t < MAP_BASE + S.FAMILIES["MAP"][1]:
-            self.board.apply((t - MAP_BASE) & 0x7FF)
+        fam, p = S.family(t)
+        if fam == "MAP":
+            self.board.apply(p & 0x3FFF)
+        elif fam == "P":
+            self.flag_i = p >> 2 & 1
+        elif fam == "JI":
+            self.flag_i = 1
+
+    def render_line(self, line: int) -> None:
+        super().render_line(line)
+        if hasattr(self.board, "scanline") and self.rendering():
+            if line == 0:
+                self.board.scanline()  # the pre-render line's clock
+            self.board.scanline()
+
+    def wants_irq(self) -> bool:
+        """At a record boundary: inject an IRQ now? (level-triggered: until acknowledged)"""
+        return bool(getattr(self.board, "irq_pending", False) and self.rec_start
+                    and not self.halted and not self.flag_i)
 
     def nt_index(self, a: int) -> int:
         return self.board.nt_index(a)
