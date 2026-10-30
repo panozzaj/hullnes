@@ -52,15 +52,20 @@ tokens/s on the same machine (its README reports about 1,650 on the machine it w
 | Architecture | `Qwen3_5ForCausalLM` (7 Gated DeltaNet layers) | plain decoder, 10 layers, 2D hardmax heads, ReGLU |
 | Memory | DeltaNet state rows, fixed size | the token trace, read by attention |
 | Residual width | 768 | 463 (NROM) to 860 (MMC3, 512 KB) |
-| Nonzero weights | 9.3M of 466.6M parameters (about 1 GB) | about 23k (NROM) to 55k (MMC3, 512 KB) |
+| Nonzero weights | 9.3M of 466.6M parameters | 2.8M (NROM) to 3.1M (MMC3, 512 KB), of which 25k to 62k are in the attention and FFN layers |
+| Size | 933 MB as bf16; 3.3 MB zipped | 3.2 GB (NROM) to 6.0 GB as dense fp64; 1.7 to 1.9 MB zipped |
 | Attention heads | 7 layers of DeltaNet heads | 25 to 28 heads, 2 dims each |
 | Tokens/s, engine alone | 3,617 | about 33,000 (NROM), 31,000 (UxROM), 22,000 (MMC1), 14,000 to 18,000 (MMC3) |
 | Speed vs a real NES, host included | 150-290x slower (its README) | 6.4x to 13.4x slower (table below) |
 | Mappers | NROM | NROM, UxROM, CNROM, MMC1, MMC3 |
 | Code in RAM | halts | runs |
 
-As dense matrices, the hullnes weights have 2.7M to 12.3M entries, nearly all zero (not counting
-the embedding table, which is sparse).
+Almost all of hullnes's nonzero weights are in the embedding and unembedding tables. The
+vocabulary has 429k
+tokens, mostly from nesformer's trace format (65,536 `IOW` tokens, 65,536 `DM` tokens, 32,768
+per jump family), and each token's row holds its decoded features. The layers that do the
+computing have 25k to 62k nonzero weights. Stored densely the model is larger than nesformer's,
+because the attention scores reach about 2^51 and need exact float64 arithmetic.
 
 ### Speed
 
