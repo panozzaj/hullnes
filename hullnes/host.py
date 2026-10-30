@@ -10,7 +10,7 @@ from pathlib import Path
 
 from hullnes import mapper
 from nesformer import spec as S
-from nesformer.host import Cart, Host
+from nesformer.host import EVENTS, FRAME_DOTS, Cart, Host
 
 MAP_BASE = S.FAMILIES["MAP"][0]
 
@@ -108,16 +108,28 @@ class BoardHost(Host):
                 self.board.scanline()  # the pre-render line's clock
             self.board.scanline()
 
-    def maybe_skip(self, target: int) -> None:
-        # nesformer's idle-loop skip fast-forwards a wait-for-NMI loop to vblank, which would
-        # jump over a scanline IRQ: don't skip while the board's IRQ is enabled
-        if getattr(self.board, "enabled", False):
-            self.prev_body = None
-            self.iter_toks = []
-            self.iter_cycle0 = self.cycles
-            self.iter_ev0 = self.ev_seq
-            return
-        super().maybe_skip(target)
+    def skip_cap(self):
+        """nesformer's idle-loop skip fast-forwards a wait-for-NMI loop to vblank; with an MMC3
+        IRQ enabled it must stop before the scanline where the IRQ will fire. Find that line by
+        running a copy of the counter over the coming render events (two frames at most)."""
+        b = self.board
+        if not getattr(b, "enabled", False) or not self.rendering():
+            return None
+        counter, reload, i, fb = b.counter, b.reload, self.ev_i, self.frame_base
+        for _ in range(2 * len(EVENTS)):
+            d, act, line = EVENTS[i]
+            if act == "render":
+                for _ in range(2 if line == 0 else 1):
+                    if counter == 0 or reload:
+                        counter, reload = b.latch, False
+                    else:
+                        counter -= 1
+                    if counter == 0:
+                        return fb + d
+            i += 1
+            if act == "frame":
+                i, fb = 0, fb + FRAME_DOTS
+        return None
 
     def wants_irq(self) -> bool:
         """At a record boundary: inject an IRQ now? (level-triggered: until acknowledged)"""

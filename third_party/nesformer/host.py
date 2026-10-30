@@ -190,6 +190,9 @@ class Host:
                 ev_dot += FRAME_DOTS
         else:
             return
+        cap = self.skip_cap()  # hullnes: e.g. the scanline a mapper IRQ fires on
+        if cap is not None:
+            ev_dot = min(ev_dot, cap)
         k = (-(-ev_dot // 3) - self.cycles) // period - 1
         if k > 0:
             self.cycles += k * period
@@ -198,6 +201,10 @@ class Host:
             self.skipped_iters += k
             self.catch_up(self.cycles * 3)
             self.iter_ev0 = self.ev_seq
+
+    def skip_cap(self):
+        """hullnes: an absolute PPU dot the idle-loop skip must stop before (None: no limit)."""
+        return None
 
     def wants_nmi(self) -> bool:
         """At a record boundary: inject an NMI now?"""
