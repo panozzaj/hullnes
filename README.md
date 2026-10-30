@@ -316,6 +316,44 @@ the RAM head's cache at every address) and starts a fresh context with that stat
 prompt. The PRG-ROM part of the prompt is cached and restored instead of fed again. The trace
 after a rollover matches the trace without one (tested with rollovers forced every 100k tokens).
 
+## Extensions: plugging it into an LLM
+
+hullnes is not connected to a language model yet. There are three ways to connect one, from
+least to most "inside the model":
+
+```
+  1. same token stream,         2. machine compiled into         3. trained hybrid: the LLM
+     two decoders                  the LLM's own weights            learns when to call the
+                                   (Qwenputer / nesformer)          executor
+```
+
+1. **Same token stream, two decoders.** The LLM writes a program or a machine state into its
+   context (a 6502 routine, a savestate, a button plan), decoding switches to hullnes for the
+   trace, and switches back when it halts or a frame ends. This is how Percepta describes it
+   ("the model then switches to fast decoding mode"). It needs no change to either model, only
+   an orchestration loop, and every step stays visible in one sequence. The computing still
+   happens outside the LLM's weights.
+2. **Compiled into an open-weights LLM.** Qwenputer did this for RISC-V inside Qwen3.5-4B, and
+   nesformer kept Qwen's shapes for the same reason. For this circuit it needs:
+   - attention scores that stay exact in bf16. They reach about 2^51 here and need float64; a
+     bf16 version would need hierarchical addressing (high byte, then low byte), a different
+     recency mechanism and more frequent rollovers;
+   - reserved residual dimensions that the LLM's weights leave alone, protected from RMSNorm
+     (Qwenputer uses a "ballast" value for this);
+   - 2D heads in dimensions that RoPE does not rotate;
+   - a trace vocabulary small enough to share the LLM's token ids (hullnes uses 429k).
+
+   Each machine token would also pay for a full LLM forward pass. Percepta suggests a fast path
+   where executor tokens skip the language model's layers.
+3. **A trained hybrid.** Fine-tune the LLM to decide when to emit a program and how to read the
+   result, with the executor frozen inside it. The trace is part of the forward pass, so
+   gradients can in principle flow through it, though with hard-max lookups they are mostly zero.
+
+Option 1 is the practical starting point. Tools an LLM could use: assemble and run 6502 code,
+run N frames, read RAM or the screen as text, and ask `why` (which instruction last wrote this
+byte, one attention query). [docs/IDEAS.md](docs/IDEAS.md) has applications: mapping a game's
+RAM, glitch hunting with LLM-proposed inputs, Game Genie codes as prompt edits.
+
 ## Limitations
 
 - Official opcodes only; an unofficial opcode emits `HALT`.
