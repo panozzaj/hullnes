@@ -1,5 +1,8 @@
 """Computation graph whose nodes map 1:1 onto parts of a transformer.
 
+(Vendored from Qwenputer, MIT. hullnes adds the ``Cumsum`` node: Percepta's running total, a
+uniform-attention head whose prefix mean is multiplied back by the position in the next FFN.)
+
 Every value is a scalar *dimension* of the residual stream, at every position.
 Dimensions come from:
 
@@ -104,12 +107,24 @@ class Lookup:
     level: int
 
 
+@dataclass
+class Cumsum:
+    """Running totals ``sum_{s <= t} value(s)``. Lowered to a uniform attention head (all scores
+    equal, so softmax averages the prefix) followed by one ReGLU unit per value that multiplies
+    the mean by (t + 1). The outputs are readable from the following FFN sublayer on."""
+
+    name: str
+    values: list[Expr]
+    out: list[int]
+    level: int  # the attention sublayer of the head
+
+
 class Graph:
     def __init__(self) -> None:
         self.dims: list[Dim] = [Dim("one", "one", 0)]
         self.token_fns: dict[int, Callable[[int], Num]] = {}
         self.pos_fns: dict[int, Callable[[int], Num]] = {}
-        self.nodes: list[FFN | Lookup] = []
+        self.nodes: list[FFN | Lookup | Cumsum] = []
         self.outputs: dict[str, Expr] = {}
         self.one = Expr({ONE: 1})
 
@@ -144,6 +159,14 @@ class Graph:
         sub = lvl + 1 if lvl % 2 == 0 else lvl + 2
         outs = [self._new_dim(f"{name}[{i}]", "attn", sub) for i in range(len(values))]
         self.nodes.append(Lookup(name, q, kx, ky, values, outs, q_range, sub))
+        return [Expr({d: 1}) for d in outs]
+
+    def cumsum(self, values: list["Expr | Num"], name: str = "cumsum") -> list[Expr]:
+        values = [as_expr(v) for v in values]
+        lvl = self.level(*values)
+        sub = lvl + 1 if lvl % 2 == 0 else lvl + 2
+        outs = [self._new_dim(f"{name}[{i}]", "attn", sub + 1) for i in range(len(values))]
+        self.nodes.append(Cumsum(name, values, outs, sub))
         return [Expr({d: 1}) for d in outs]
 
     def output(self, name: str, e: "Expr | Num") -> None:

@@ -12,7 +12,7 @@ Two cache implementations:
 
 from fractions import Fraction
 
-from chipformer.dsl.graph import FFN, ONE, Expr, Graph, Lookup, Num
+from chipformer.dsl.graph import FFN, ONE, Cumsum, Expr, Graph, Lookup, Num
 
 EXACT_LIMIT = 1 << 53  # every quantity must stay exactly representable in fp64
 
@@ -103,6 +103,7 @@ class Evaluator:
         self.heads = [n for n in graph.nodes if isinstance(n, Lookup)]
         self.caches = {id(h): cache_cls(*h.q_range) for h in self.heads}
         self.head_values: dict[int, list[list[Num]]] = {id(h): [] for h in self.heads}
+        self.sums = {id(n): [0] * len(n.values) for n in graph.nodes if isinstance(n, Cumsum)}
         self.pos = 0
         self.rows: list[list[Num]] | None = None  # optionally keep every residual row
 
@@ -122,6 +123,11 @@ class Evaluator:
         for node in g.nodes:
             if isinstance(node, FFN):
                 vals[node.out] = sum(c * ev(a, vals) * relu(ev(b, vals)) for c, a, b in node.terms)
+            elif isinstance(node, Cumsum):
+                acc = self.sums[id(node)]
+                for i, v in enumerate(node.values):
+                    acc[i] += ev(v, vals)
+                    vals[node.out[i]] = acc[i]
             else:
                 cache = self.caches[id(node)]
                 store = self.head_values[id(node)]
