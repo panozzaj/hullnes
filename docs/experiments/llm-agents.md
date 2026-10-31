@@ -32,5 +32,28 @@ read zero page, `why` on a range). Its stated evidence was partly wrong: it desc
 decreasing value (the low byte wrapping as the level scrolled) as moving right.
 
 Both models may know Super Mario Bros.'s RAM layout from training, so these runs show that the
-tools work for an agent rather than measuring discovery from scratch. A homebrew game the models
-have not seen would be the cleaner test.
+tools work for an agent rather than measuring discovery from scratch. The Thwaite runs below are
+the cleaner test.
+
+## Thwaite, a game neither model knew
+
+Thwaite is a homebrew Missile Command-style game. Both runs had no web access and no source.
+
+**Claude Code subagent:** [thwaite-ram-map.md](thwaite-ram-map.md), about 45 regions (about 20
+at high confidence) in about 50 tool calls, playing through the tutorial wave, the bonus tally
+and a game over. Before starting it knew only the genre. It found the controller bytes, the
+crosshair (`$04DE-$04ED`, whole-pixel X at `$04E0`), ammo per silo, one 20-slot object table
+shared by the player's fireworks and the incoming missiles (both moved by the same code, which
+`--why` showed), explosions, 12 building states including the two silos, and a score written
+only at the end of a wave. It used `--why` to set aside every byte written by the sound engine.
+It asked for read tracking, "run until this byte changes", a per-frame watch, and a built-in
+diff.
+
+**Gemma 4 (local):** asked for the crosshair's X. Its first run never looked at the screen
+again after the start and spent 30 turns moving left and right on a tutorial dialog. With
+`--auto-look` (the screen attached to every step) it got into the game and answered `$001A`
+in 21 calls, without evidence. That is wrong. From one in-game savestate, holding Left for 20
+frames moves `$04E0` from `$40` to `$1F` and holding Right moves it to `$60`, written by
+`$8FE7 STA abs,X` on the last frame; `$001A` stays `$B6` either way, last written by the sound
+code (`$C6CD INC (zp,X)`) 13 frames earlier. Gemma picked a byte that changed during its steps
+without checking whether the input caused the change.
