@@ -1,9 +1,13 @@
 # LLM + NES ideas
 
-Things this design makes cheap that an ordinary emulator does not, ordered roughly from
-"an afternoon on top of what exists" to "a research project". The common thread: the machine's
-history is a token sequence, its memory is attention over that sequence, and its program is a
-prompt. All three are things an LLM, or a tool an LLM drives, can read and edit.
+Ordered roughly from "an afternoon on top of what exists" to "a research project".
+
+Most of these (1 to 4) are tools an emulator with a debugger could also provide: Mesen and FCEUX
+have write breakpoints, trace loggers and savestates, and run much faster. Here they fall out of
+the design (memory is attention over the token history, a savestate is a prompt), which makes
+them a good way to see that design at work, but they are not a reason to prefer a transformer
+over an emulator. Ideas 5 and 6, and the LLM integration in the README's Extensions section,
+are the ones that depend on the machine being a neural network.
 
 ## 1. Provenance: who wrote this byte? (exists)
 
@@ -17,7 +21,8 @@ Where it goes next: follow the chain. The writing instruction read its operands 
 and those reads are attention lookups too, so the whole dataflow graph behind a value is
 recoverable. An agent that labels RAM ("$0086 is the player's X, updated every frame from
 these two other bytes") could build a game's RAM map with no prior knowledge, which is the
-first thing anyone hacking or speedrunning a game needs.
+first thing anyone hacking or speedrunning a game needs. A Claude Code subagent did this for
+Thwaite with the session tools; see [experiments/llm-agents.md](experiments/llm-agents.md).
 
 ## 2. Glitch hunting from the trace
 

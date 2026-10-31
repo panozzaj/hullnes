@@ -47,6 +47,27 @@ Bros., Super Mario Bros. 3, Mega Man, Mega Man 2, Mega Man 3, Metroid, The Legen
 Icarus, Kirby's Adventure, Castlevania, Contra and DuckTales, plus nestest and the two homebrew
 games.
 
+## Why a transformer and not an emulator?
+
+hullnes is not a better emulator. Mesen or FCEUX run games far faster, emulate the PPU and APU
+properly, and their debuggers have memory viewers, savestates, and read and write breakpoints.
+Everything the session tools below do for an LLM agent, an agent driving one of those could do
+too.
+
+What the transformer form adds:
+
+- **A demonstration.** An ordinary forward pass (attention plus ReLUs) runs real software
+  exactly: memory is attention over the token history and the program counter is a running sum.
+  Seeing it run Zelda makes Percepta's and nesformer's claim concrete.
+- **Ground truth for studying neural networks.** Every weight and every lookup here has a known
+  meaning. That is useful for testing interpretability methods (can they find circuits that are
+  known to be there?) and for training ordinary transformers on exact traces and activations to
+  see which parts of a CPU they learn. An emulator's internals are not a network, so it offers
+  neither.
+- **A step toward a computer inside a language model.** The reason to want a computer in
+  transformer weights is to put it in an LLM's own forward pass, with no tool boundary. hullnes
+  does not do that yet; see [Extensions](#extensions-plugging-it-into-an-llm).
+
 ## Results
 
 ### Compared with nesformer
@@ -349,10 +370,14 @@ least to most "inside the model":
    result, with the executor frozen inside it. The trace is part of the forward pass, so
    gradients can in principle flow through it, though with hard-max lookups they are mostly zero.
 
-Option 1 is the practical starting point. Tools an LLM could use: assemble and run 6502 code,
-run N frames, read RAM or the screen as text, and ask `why` (which instruction last wrote this
-byte, one attention query). [docs/IDEAS.md](docs/IDEAS.md) has applications: mapping a game's
-RAM, glitch hunting with LLM-proposed inputs, Game Genie codes as prompt edits.
+A version of option 1 exists. `hullnes session new|step|ram` plays step by step with savestate
+files, and `step --why` asks the RAM head which instruction last wrote an address.
+`scripts/llm_play.py` lets a local model (through Ollama) drive those tools. With them a Claude
+Code subagent built RAM maps of Super Mario Bros. and Thwaite, and Gemma 4 found one address in
+Super Mario Bros. and got Thwaite's wrong; see
+[docs/experiments/llm-agents.md](docs/experiments/llm-agents.md). These experiments show the tools
+work for an agent. They do not depend on the machine being a transformer: the same agent could
+drive an emulator's debugger. Options 2 and 3 are where the transformer form would matter.
 
 ## Limitations
 
